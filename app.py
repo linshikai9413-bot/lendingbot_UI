@@ -269,11 +269,26 @@ with t1:
         loan_data = []
         for l in loans:
             if isinstance(l, list) and len(l) >= 13:
+                # l[3] 是 MTS_CREATE (建立時間毫秒)
+                created_ts = float(l[3]) 
+                period = int(l[12])
+                
+                # 正確邏輯：到期日 = 建立日期 + 天數
+                created_dt = datetime.fromtimestamp(created_ts/1000)
+                due_dt = created_dt + timedelta(days=period)
+                
+                # 計算剩餘天數
+                now = datetime.now()
+                remaining_delta = due_dt - now
+                remaining_days_val = max(0.0, remaining_delta.total_seconds() / 86400)
+                
                 loan_data.append({
+                    "開單日期": created_dt.strftime('%m-%d %H:%M'),
                     "金額 (USD)": abs(float(l[5])),
                     "APY": to_apy(float(l[11])),
-                    "天數": int(l[12]),
-                    "到期時間": (datetime.now() + timedelta(days=int(l[12]))).strftime('%m-%d %H:%M') if l[12] else "-"
+                    "天數": period,
+                    "剩餘天數": f"{remaining_days_val:.1f} 天",
+                    "到期時間": due_dt.strftime('%m-%d %H:%M')
                 })
         df_loans = pd.DataFrame(loan_data).sort_values("APY", ascending=False)
         st.dataframe(df_loans, use_container_width=True, 
@@ -303,7 +318,7 @@ with t2:
     else:
         st.info("目前沒有掛單")
 
-# --- 偵錯模式 (修復版) ---
+# --- 偵錯模式 ---
 if debug_mode:
     st.markdown("---")
     st.subheader("🐞 原始數據偵錯")
@@ -316,7 +331,6 @@ if debug_mode:
             
         st.write("▼ API 回傳的原始帳本數據 (前 20 筆):")
         
-        # 安全的欄位選擇：只顯示存在的欄位
         possible_cols = ['datetime', 'amount', 'currency', 'type', 'description', 'balance', 'info']
         existing_cols = [c for c in possible_cols if c in raw_df.columns]
         
