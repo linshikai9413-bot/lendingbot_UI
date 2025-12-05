@@ -23,7 +23,6 @@ TEXT_MAIN = "#E6E6E6"
 TEXT_SUB = "#A1A9B3"
 COLOR_BUY = "#00C896"  # 綠 (收益)
 COLOR_ACCENT = "#4F8BF9" # 藍 (重點)
-COLOR_APY = "#AB47BC" # 紫 (APY 曲線)
 
 st.markdown(f"""
     <style>
@@ -71,7 +70,6 @@ def force_inject_market(exchange, symbol='fUSD'):
     強制注入 Funding 市場與貨幣定義
     解決 'uppercaseId', 'market symbol not found' 等所有定義缺失問題
     """
-    # 確保字典已初始化
     if exchange.markets is None: exchange.markets = {}
     if exchange.markets_by_id is None: exchange.markets_by_id = {}
     if exchange.currencies is None: exchange.currencies = {} 
@@ -82,7 +80,7 @@ def force_inject_market(exchange, symbol='fUSD'):
     market_def = {
         'id': symbol, 'symbol': symbol, 
         'base': 'USD', 'quote': 'USD',
-        'baseId': 'USD', 'quoteId': 'USD', # 補齊 baseId/quoteId
+        'baseId': 'USD', 'quoteId': 'USD',
         'type': 'funding', 'spot': False, 'margin': False, 'swap': False, 'future': False,
         'option': False, 'contract': False, 'active': True,
         'precision': {'amount': 8, 'price': 8},
@@ -92,12 +90,11 @@ def force_inject_market(exchange, symbol='fUSD'):
     exchange.markets_by_id[symbol] = market_def
     
     # 2. 強制覆蓋貨幣定義 (USD)
-    # [關鍵修正] 不使用 if not in，而是直接覆蓋，確保 uppercaseId 存在
     currency_code = 'USD'
     usd_def = {
         'id': currency_code,
         'code': currency_code,
-        'uppercaseId': currency_code, # 關鍵屬性
+        'uppercaseId': currency_code,
         'name': 'US Dollar',
         'active': True,
         'precision': 2,
@@ -111,7 +108,7 @@ def to_apy(daily_rate): return float(daily_rate) * 365 * 100
 def fetch_account_data(exchange, currency='USD'):
     """獲取帳戶餘額、收益、掛單、放貸中、最近成交"""
     try:
-        # 強制注入市場與貨幣定義 (每次都執行以確保安全)
+        # 強制注入市場與貨幣定義
         force_inject_market(exchange, f'f{currency}')
 
         # 1. Balance
@@ -122,13 +119,14 @@ def fetch_account_data(exchange, currency='USD'):
         since_1y = exchange.milliseconds() - (365 * 24 * 60 * 60 * 1000)
         ledgers = exchange.fetch_ledger(currency, since=since_1y, limit=2500)
         
-        # 3. Active Credits (放貸中)
+        # 3. Active Credits (放貸中/持倉)
         active_credits = exchange.private_post_auth_r_funding_credits(params={'symbol': f'f{currency}'})
         
         # 4. Active Offers (掛單中)
         active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': f'f{currency}'})
 
         # 5. Recent Trades (最近成交) - 使用 Raw API
+        # 這回傳的是真正的成交紀錄 (Execution)，不是掛單
         raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': f'f{currency}', 'limit': 20})
         
         return usd_bal, ledgers, active_credits, active_offers, raw_trades
@@ -150,7 +148,6 @@ def process_earnings(ledgers_data):
         
         # 過濾邏輯
         if amount <= 0: continue
-        # 排除本金操作 (transfer, transaction, deposit, withdrawal)
         if 'transaction' in typ or 'transfer' in typ or 'deposit' in typ or 'withdrawal' in typ: continue
 
         is_payout_type = 'payout' in typ
@@ -205,7 +202,6 @@ exchange = init_exchange(st.session_state.api_key, st.session_state.api_secret)
 
 # 獲取數據
 with st.spinner("正在結算收益數據..."):
-    # 新增 loans, offers, trades
     account_bal, raw_ledgers, loans, offers, trades = fetch_account_data(exchange, 'USD')
     df_earnings = process_earnings(raw_ledgers)
 
@@ -233,7 +229,6 @@ if not df_earnings.empty:
     first_date = df_earnings['date'].min()
     today_date = pd.Timestamp.now().date()
     days_diff = (today_date - first_date).days + 1
-    
     if days_diff < 1: days_diff = 1 
     
     if total_assets > 0:
@@ -253,7 +248,7 @@ col5.metric("全歷史 APY", f"{calculated_apy:.2f}%", help=f"算法：(總收�
 
 st.markdown("---")
 
-# --- 第二層：收益量化圖表 + APY 曲線 ---
+# --- 第二層：收益量化圖表 ---
 st.subheader("📊 每日績效分析")
 
 if not df_earnings.empty:
@@ -277,7 +272,7 @@ if not df_earnings.empty:
     
     if start_date > end_date: start_date = end_date
 
-    # 1. 資料處理：產生完整日期序列並合併收益
+    # 資料處理：產生完整日期序列並合併收益
     full_date_idx = pd.date_range(start=start_date, end=end_date).date
     df_full_dates = pd.DataFrame(full_date_idx, columns=['date'])
     mask = (df_earnings['date'] >= start_date) & (df_earnings['date'] <= end_date)
@@ -285,56 +280,33 @@ if not df_earnings.empty:
     df_grouped = df_filtered.groupby('date')['amount'].sum().reset_index()
     df_chart = pd.merge(df_full_dates, df_grouped, on='date', how='left').fillna(0)
 
-    # 2. 計算每日 APY (當日收益 / 總資產 * 365 * 100)
+    # 計算每日 APY (當日收益 / 總資產 * 365 * 100)
     if total_assets > 0:
         df_chart['daily_apy'] = (df_chart['amount'] / total_assets) * 365 * 100
     else:
         df_chart['daily_apy'] = 0.0
 
     if not df_chart.empty:
-        c1, c2 = st.columns(2)
+        total_in_range = df_chart['amount'].sum()
         
-        # 左圖：每日利息收入 (長條圖)
-        with c1:
-            total_in_range = df_chart['amount'].sum()
-            fig_bar = px.bar(
-                df_chart, 
-                x='date', 
-                y='amount',
-                title=f"💰 區間收益: ${total_in_range:.2f}",
-                labels={'date': '日期', 'amount': '收益 (USD)'},
-                color_discrete_sequence=[COLOR_BUY]
-            )
-            fig_bar.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', 
-                paper_bgcolor='rgba(0,0,0,0)',
-                hovermode="x unified",
-                xaxis=dict(showgrid=False),
-                yaxis=dict(showgrid=True, gridcolor='#333'),
-                bargap=0.1
-            )
-            st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_chart_{range_option}")
-
-        # 右圖：每日績效 APY (折線圖)
-        with c2:
-            avg_apy_in_range = df_chart['daily_apy'].mean()
-            fig_line = px.line(
-                df_chart, 
-                x='date', 
-                y='daily_apy',
-                title=f"📈 平均 APY: {avg_apy_in_range:.2f}%",
-                labels={'date': '日期', 'daily_apy': '年化報酬率 (%)'},
-                color_discrete_sequence=[COLOR_APY]
-            )
-            fig_line.update_traces(fill='tozeroy', line=dict(width=3))
-            fig_line.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', 
-                paper_bgcolor='rgba(0,0,0,0)',
-                hovermode="x unified",
-                xaxis=dict(showgrid=False),
-                yaxis=dict(showgrid=True, gridcolor='#333')
-            )
-            st.plotly_chart(fig_line, use_container_width=True, key=f"line_chart_{range_option}")
+        # 只顯示長條圖 (移除了右側折線圖)
+        fig_bar = px.bar(
+            df_chart, 
+            x='date', 
+            y='amount',
+            title=f"💰 區間收益: ${total_in_range:.2f}",
+            labels={'date': '日期', 'amount': '收益 (USD)'},
+            color_discrete_sequence=[COLOR_BUY]
+        )
+        fig_bar.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)', 
+            paper_bgcolor='rgba(0,0,0,0)',
+            hovermode="x unified",
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=True, gridcolor='#333'),
+            bargap=0.1
+        )
+        st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_chart_{range_option}")
 
     else:
         st.info(f"{range_option} 區間內無收益數據")
@@ -344,7 +316,7 @@ else:
 # --- 第三層：資產詳細清單 (放貸與掛單) ---
 st.markdown("---")
 st.subheader("📋 資產詳細清單")
-t1, t2, t3, t4 = st.tabs(["正在放貸 (Active Loans)", "掛單中 (Orders)", "最近成交 (Recent Trades)", "每日收益 (Daily Stats)"])
+t1, t2, t3, t4 = st.tabs(["正在放貸 (Active Loans)", "掛單中 (Orders)", "最近成交 (Executed Trades)", "每日收益 (Daily Stats)"])
 
 with t1:
     if loans:
@@ -399,17 +371,26 @@ with t3:
     if trades:
         trade_data = []
         # Raw API 格式: [ID, SYMBOL, MTS_CREATE, ORDER_ID, AMOUNT, RATE, PERIOD]
-        # 注意: 確保順序正確 (通常 API 回傳最新的在前面)
+        # 使用 Raw trades (已成交紀錄)
         
-        # 簡單保護: 確認 trades 是一個列表
+        # 簡單保護
         if isinstance(trades, list):
-            for t in trades:
-                # Raw list format parsing
+            # 確保按時間倒序
+            # 列表元素為 list，第二個元素 (index 2) 是 MTS_CREATE
+            sorted_trades = sorted(trades, key=lambda x: x[2] if len(x)>2 else 0, reverse=True)
+            top_10_trades = sorted_trades[:10]
+            
+            for t in top_10_trades:
                 if isinstance(t, list) and len(t) >= 7:
                     mts = float(t[2])
                     amount = float(t[4])
                     rate = float(t[5])
                     period = int(t[6])
+                    
+                    # 只有真正成交借出的單通常 amount 是負數 (借出資金) 或 正數 (視視角而定)
+                    # Bitfinex Funding Trade: 
+                    # If I offer funding (Lend), I get a trade.
+                    # 通常我們只關心成交，所以列出所有。
                     
                     trade_data.append({
                         "成交時間": datetime.fromtimestamp(mts/1000).strftime('%m-%d %H:%M'),
@@ -423,15 +404,15 @@ with t3:
                 st.dataframe(df_trades, use_container_width=True, 
                              column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額 (USD)": st.column_config.NumberColumn(format="$%.2f")})
             else:
-                st.info("無成交資料 (格式可能不符)")
+                st.info("無有效成交資料")
         else:
-            st.info("無最近成交紀錄")
+            st.info("無最近成交紀錄 (格式錯誤)")
     else:
         st.info("目前沒有最近成交紀錄")
 
 with t4:
     if 'df_chart' in locals() and not df_chart.empty:
-        # 複製並倒序排列 (最新的日期在上面)
+        # 複製並倒序排列
         df_daily_stats = df_chart.copy()
         df_daily_stats = df_daily_stats.sort_values('date', ascending=False)
         
