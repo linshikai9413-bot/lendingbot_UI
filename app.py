@@ -241,7 +241,6 @@ if not df_earnings.empty:
     df_chart = pd.merge(df_full_dates, df_grouped, on='date', how='left').fillna(0)
 
     # 2. 計算每日 APY (當日收益 / 總資產 * 365 * 100)
-    # 注意：這裡假設總資產是固定的 (用當前 total_assets)，若資產變動大則會有誤差，但作為參考已足夠
     if total_assets > 0:
         df_chart['daily_apy'] = (df_chart['amount'] / total_assets) * 365 * 100
     else:
@@ -307,7 +306,7 @@ with t1:
         loan_data = []
         for l in loans:
             if isinstance(l, list) and len(l) >= 13:
-                created_ts = float(l[3]) 
+                created_ts = float(l[3])
                 period = int(l[12])
                 created_dt = datetime.fromtimestamp(created_ts/1000)
                 due_dt = created_dt + timedelta(days=period)
@@ -335,7 +334,7 @@ with t2:
         for o in offers:
              if isinstance(o, list) and len(o) >= 16:
                 rate_raw = float(o[14])
-                is_frr = rate_raw == 0
+                is_frr = rate_raw == 0 # 0 代表 FRR
                 apy_display = "FRR" if is_frr else f"{to_apy(rate_raw):.2f}%"
                 
                 offer_data.append({
