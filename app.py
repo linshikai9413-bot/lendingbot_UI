@@ -271,7 +271,7 @@ if not df_earnings.empty:
             )
             st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_chart_{range_option}")
 
-        # 右圖：每日績效 APY (折線圖) - NEW
+        # 右圖：每日績效 APY (折線圖)
         with c2:
             avg_apy_in_range = df_chart['daily_apy'].mean()
             fig_line = px.line(
@@ -282,7 +282,6 @@ if not df_earnings.empty:
                 labels={'date': '日期', 'daily_apy': '年化報酬率 (%)'},
                 color_discrete_sequence=[COLOR_APY]
             )
-            # 填充線下區域，增加視覺效果
             fig_line.update_traces(fill='tozeroy', line=dict(width=3))
             fig_line.update_layout(
                 plot_bgcolor='rgba(0,0,0,0)', 
@@ -301,22 +300,17 @@ else:
 # --- 第三層：資產詳細清單 (放貸與掛單) ---
 st.markdown("---")
 st.subheader("📋 資產詳細清單")
-t1, t2, t3 = st.tabs(["正在放貸 (Active Loans)", "掛單中 (Orders)", "最近成交 (Recent Trades)"])
+t1, t2, t3, t4 = st.tabs(["正在放貸 (Active Loans)", "掛單中 (Orders)", "最近成交 (Recent Trades)", "每日收益 (Daily Stats)"])
 
 with t1:
     if loans:
         loan_data = []
         for l in loans:
             if isinstance(l, list) and len(l) >= 13:
-                # l[3] 是 MTS_CREATE (建立時間毫秒)
                 created_ts = float(l[3]) 
                 period = int(l[12])
-                
-                # 正確邏輯：到期日 = 建立日期 + 天數
                 created_dt = datetime.fromtimestamp(created_ts/1000)
                 due_dt = created_dt + timedelta(days=period)
-                
-                # 計算剩餘天數
                 now = datetime.now()
                 remaining_delta = due_dt - now
                 remaining_days_val = max(0.0, remaining_delta.total_seconds() / 86400)
@@ -341,7 +335,7 @@ with t2:
         for o in offers:
              if isinstance(o, list) and len(o) >= 16:
                 rate_raw = float(o[14])
-                is_frr = rate_raw == 0 # 0 代表 FRR
+                is_frr = rate_raw == 0
                 apy_display = "FRR" if is_frr else f"{to_apy(rate_raw):.2f}%"
                 
                 offer_data.append({
@@ -360,13 +354,10 @@ with t2:
 with t3:
     if trades:
         trade_data = []
-        # 確保按時間倒序 (最新的在前面)
         sorted_trades = sorted(trades, key=lambda x: x['timestamp'], reverse=True)
-        # 只取前 10 筆
         top_10_trades = sorted_trades[:10]
         
         for t in top_10_trades:
-            # Bitfinex funding trade price is daily rate
             rate_daily = float(t['price'])
             amount = float(t['amount'])
             
@@ -382,6 +373,28 @@ with t3:
                      column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額 (USD)": st.column_config.NumberColumn(format="$%.2f")})
     else:
         st.info("目前沒有最近成交紀錄")
+
+with t4:
+    if 'df_chart' in locals() and not df_chart.empty:
+        # 複製並倒序排列 (最新的日期在上面)
+        df_daily_stats = df_chart.copy()
+        df_daily_stats = df_daily_stats.sort_values('date', ascending=False)
+        
+        # 整理欄位
+        df_show = df_daily_stats[['date', 'amount', 'daily_apy']].copy()
+        df_show.columns = ['日期', '收益 (USD)', '當日績效 APY']
+        
+        st.dataframe(
+            df_show, 
+            use_container_width=True,
+            column_config={
+                "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
+                "收益 (USD)": st.column_config.NumberColumn("收益 (USD)", format="$%.2f"),
+                "當日績效 APY": st.column_config.NumberColumn("當日績效 APY", format="%.2f%%")
+            }
+        )
+    else:
+        st.info("目前無收益數據可顯示 (或未選擇日期範圍)")
 
 # --- 偵錯模式 ---
 if debug_mode:
