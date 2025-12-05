@@ -69,15 +69,20 @@ def init_exchange(api_key, api_secret):
 def force_inject_market(exchange, symbol='fUSD'):
     """
     強制注入 Funding 市場與貨幣定義
-    解決 'market symbol not found', 'currencies not loaded', 'uppercaseId' 錯誤
+    解決 'uppercaseId', 'market symbol not found' 等所有定義缺失問題
     """
+    # 確保字典已初始化
     if exchange.markets is None: exchange.markets = {}
     if exchange.markets_by_id is None: exchange.markets_by_id = {}
     if exchange.currencies is None: exchange.currencies = {} 
-    
+    if not hasattr(exchange, 'currencies_by_id') or exchange.currencies_by_id is None:
+        exchange.currencies_by_id = {}
+
     # 1. 注入市場定義 (fUSD)
     market_def = {
-        'id': symbol, 'symbol': symbol, 'base': 'USD', 'quote': 'USD',
+        'id': symbol, 'symbol': symbol, 
+        'base': 'USD', 'quote': 'USD',
+        'baseId': 'USD', 'quoteId': 'USD', # 補齊 baseId/quoteId
         'type': 'funding', 'spot': False, 'margin': False, 'swap': False, 'future': False,
         'option': False, 'contract': False, 'active': True,
         'precision': {'amount': 8, 'price': 8},
@@ -86,22 +91,27 @@ def force_inject_market(exchange, symbol='fUSD'):
     exchange.markets[symbol] = market_def
     exchange.markets_by_id[symbol] = market_def
     
-    # 2. 注入貨幣定義 (USD) - [修正] 補上 uppercaseId
+    # 2. 強制覆蓋貨幣定義 (USD)
+    # [關鍵修正] 不使用 if not in，而是直接覆蓋，確保 uppercaseId 存在
     currency_code = 'USD'
-    if currency_code not in exchange.currencies:
-        exchange.currencies[currency_code] = {
-            'id': currency_code,
-            'code': currency_code,
-            'uppercaseId': currency_code, # 關鍵修正：這是 ccxt 內部需要的屬性
-            'precision': 2,
-        }
+    usd_def = {
+        'id': currency_code,
+        'code': currency_code,
+        'uppercaseId': currency_code, # 關鍵屬性
+        'name': 'US Dollar',
+        'active': True,
+        'precision': 2,
+        'limits': {'amount': {'min': 0.0}, 'withdraw': {'min': 0.0}}
+    }
+    exchange.currencies[currency_code] = usd_def
+    exchange.currencies_by_id[currency_code] = usd_def
 
 def to_apy(daily_rate): return float(daily_rate) * 365 * 100
 
 def fetch_account_data(exchange, currency='USD'):
     """獲取帳戶餘額、收益、掛單、放貸中、最近成交"""
     try:
-        # 強制注入市場與貨幣定義
+        # 強制注入市場與貨幣定義 (每次都執行以確保安全)
         force_inject_market(exchange, f'f{currency}')
 
         # 1. Balance
@@ -118,7 +128,7 @@ def fetch_account_data(exchange, currency='USD'):
         # 4. Active Offers (掛單中)
         active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': f'f{currency}'})
 
-        # 5. Recent Trades (最近成交) - 使用 Raw API 避開市場檢查
+        # 5. Recent Trades (最近成交) - 使用 Raw API
         raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': f'f{currency}', 'limit': 20})
         
         return usd_bal, ledgers, active_credits, active_offers, raw_trades
