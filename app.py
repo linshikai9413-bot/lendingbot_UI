@@ -58,18 +58,37 @@ st.markdown(f"""
 
 @st.cache_resource
 def init_exchange(api_key, api_secret):
-    return ccxt.bitfinex({
+    exchange = ccxt.bitfinex({
         'apiKey': api_key,
         'secret': api_secret,
         'enableRateLimit': True,
         'nonce': lambda: int(time.time() * 1000000), 
     })
+    return exchange
+
+def force_inject_market(exchange, symbol='fUSD'):
+    """強制注入 Funding 市場定義，防止 CCXT 報錯"""
+    if exchange.markets is None: exchange.markets = {}
+    if exchange.markets_by_id is None: exchange.markets_by_id = {}
+    
+    market_def = {
+        'id': symbol, 'symbol': symbol, 'base': 'USD', 'quote': 'USD',
+        'type': 'funding', 'spot': False, 'margin': False, 'swap': False, 'future': False,
+        'option': False, 'contract': False, 'active': True,
+        'precision': {'amount': 8, 'price': 8},
+        'limits': {'amount': {'min': 150.0}, 'price': {'min': 0.0}}
+    }
+    exchange.markets[symbol] = market_def
+    exchange.markets_by_id[symbol] = market_def
 
 def to_apy(daily_rate): return float(daily_rate) * 365 * 100
 
 def fetch_account_data(exchange, currency='USD'):
     """獲取帳戶餘額、收益、掛單、放貸中、最近成交"""
     try:
+        # 強制注入市場定義，解決 'market symbol fUSD' 錯誤
+        force_inject_market(exchange, f'f{currency}')
+
         # 1. Balance
         balance = exchange.fetch_balance({'type': 'funding'})
         usd_bal = balance.get(currency, {'total': 0.0, 'free': 0.0, 'used': 0.0})
@@ -84,12 +103,15 @@ def fetch_account_data(exchange, currency='USD'):
         # 4. Active Offers (掛單中)
         active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': f'f{currency}'})
 
-        # 5. Recent Trades (最近成交)
-        recent_trades = exchange.fetch_my_trades(symbol=f'f{currency}', limit=20)
+        # 5. Recent Trades (最近成交) - [修正] 改用 Raw API
+        # 原本 fetch_my_trades 會檢查市場清單導致報錯，改用 Raw API 直接抓
+        # 回傳格式: [[ID, SYMBOL, MTS_CREATE, ORDER_ID, AMOUNT, RATE, PERIOD], ...]
+        raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': f'f{currency}', 'limit': 20})
         
-        return usd_bal, ledgers, active_credits, active_offers, recent_trades
+        return usd_bal, ledgers, active_credits, active_offers, raw_trades
     except Exception as e:
         st.error(f"數據獲取失敗: {e}")
+        # 回傳空值以免後續處理崩潰
         return None, [], [], [], []
 
 def process_earnings(ledgers_data):
@@ -161,6 +183,7 @@ exchange = init_exchange(st.session_state.api_key, st.session_state.api_secret)
 
 # 獲取數據
 with st.spinner("正在結算收益數據..."):
+    # 新增 loans, offers, trades
     account_bal, raw_ledgers, loans, offers, trades = fetch_account_data(exchange, 'USD')
     df_earnings = process_earnings(raw_ledgers)
 
@@ -334,7 +357,7 @@ with t2:
         for o in offers:
              if isinstance(o, list) and len(o) >= 16:
                 rate_raw = float(o[14])
-                is_frr = rate_raw == 0 # 0 代表 FRR
+                is_frr = rate_raw == 0 
                 apy_display = "FRR" if is_frr else f"{to_apy(rate_raw):.2f}%"
                 
                 offer_data.append({
@@ -353,23 +376,34 @@ with t2:
 with t3:
     if trades:
         trade_data = []
-        sorted_trades = sorted(trades, key=lambda x: x['timestamp'], reverse=True)
-        top_10_trades = sorted_trades[:10]
+        # Raw API 格式: [ID, SYMBOL, MTS_CREATE, ORDER_ID, AMOUNT, RATE, PERIOD]
+        # 注意: 確保順序正確 (通常 API 回傳最新的在前面)
         
-        for t in top_10_trades:
-            rate_daily = float(t['price'])
-            amount = float(t['amount'])
+        # 簡單保護: 確認 trades 是一個列表
+        if isinstance(trades, list):
+            for t in trades:
+                # Raw list format parsing
+                if isinstance(t, list) and len(t) >= 7:
+                    mts = float(t[2])
+                    amount = float(t[4])
+                    rate = float(t[5])
+                    period = int(t[6])
+                    
+                    trade_data.append({
+                        "成交時間": datetime.fromtimestamp(mts/1000).strftime('%m-%d %H:%M'),
+                        "金額 (USD)": abs(amount),
+                        "APY": to_apy(rate),
+                        "天數": period
+                    })
             
-            trade_data.append({
-                "成交時間": datetime.fromtimestamp(t['timestamp']/1000).strftime('%m-%d %H:%M'),
-                "金額 (USD)": abs(amount),
-                "APY": to_apy(rate_daily),
-                "類型": t['side'].upper() if 'side' in t else 'N/A'
-            })
-            
-        df_trades = pd.DataFrame(trade_data)
-        st.dataframe(df_trades, use_container_width=True, 
-                     column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額 (USD)": st.column_config.NumberColumn(format="$%.2f")})
+            if trade_data:
+                df_trades = pd.DataFrame(trade_data)
+                st.dataframe(df_trades, use_container_width=True, 
+                             column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額 (USD)": st.column_config.NumberColumn(format="$%.2f")})
+            else:
+                st.info("無成交資料 (格式可能不符)")
+        else:
+            st.info("無最近成交紀錄")
     else:
         st.info("目前沒有最近成交紀錄")
 
