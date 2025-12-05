@@ -67,10 +67,15 @@ def init_exchange(api_key, api_secret):
     return exchange
 
 def force_inject_market(exchange, symbol='fUSD'):
-    """強制注入 Funding 市場定義，防止 CCXT 報錯"""
+    """
+    強制注入 Funding 市場與貨幣定義
+    解決 'market symbol not found' 與 'currencies not loaded' 錯誤
+    """
     if exchange.markets is None: exchange.markets = {}
     if exchange.markets_by_id is None: exchange.markets_by_id = {}
+    if exchange.currencies is None: exchange.currencies = {} # 關鍵修正：初始化貨幣字典
     
+    # 1. 注入市場定義 (fUSD)
     market_def = {
         'id': symbol, 'symbol': symbol, 'base': 'USD', 'quote': 'USD',
         'type': 'funding', 'spot': False, 'margin': False, 'swap': False, 'future': False,
@@ -80,13 +85,22 @@ def force_inject_market(exchange, symbol='fUSD'):
     }
     exchange.markets[symbol] = market_def
     exchange.markets_by_id[symbol] = market_def
+    
+    # 2. 注入貨幣定義 (USD) - 解決 fetch_ledger 報錯
+    currency_code = 'USD'
+    if currency_code not in exchange.currencies:
+        exchange.currencies[currency_code] = {
+            'id': currency_code,
+            'code': currency_code,
+            'precision': 2,
+        }
 
 def to_apy(daily_rate): return float(daily_rate) * 365 * 100
 
 def fetch_account_data(exchange, currency='USD'):
     """獲取帳戶餘額、收益、掛單、放貸中、最近成交"""
     try:
-        # 強制注入市場定義，解決 'market symbol fUSD' 錯誤
+        # 強制注入市場與貨幣定義
         force_inject_market(exchange, f'f{currency}')
 
         # 1. Balance
@@ -103,15 +117,12 @@ def fetch_account_data(exchange, currency='USD'):
         # 4. Active Offers (掛單中)
         active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': f'f{currency}'})
 
-        # 5. Recent Trades (最近成交) - [修正] 改用 Raw API
-        # 原本 fetch_my_trades 會檢查市場清單導致報錯，改用 Raw API 直接抓
-        # 回傳格式: [[ID, SYMBOL, MTS_CREATE, ORDER_ID, AMOUNT, RATE, PERIOD], ...]
+        # 5. Recent Trades (最近成交) - 使用 Raw API 避開市場檢查
         raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': f'f{currency}', 'limit': 20})
         
         return usd_bal, ledgers, active_credits, active_offers, raw_trades
     except Exception as e:
         st.error(f"數據獲取失敗: {e}")
-        # 回傳空值以免後續處理崩潰
         return None, [], [], [], []
 
 def process_earnings(ledgers_data):
