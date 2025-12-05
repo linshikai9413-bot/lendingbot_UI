@@ -4,6 +4,7 @@ import pandas as pd
 import time
 import statistics
 import math
+import traceback # 新增 traceback 用於診斷
 from datetime import datetime, timedelta, timezone
 import plotly.express as px
 import plotly.graph_objects as go
@@ -50,6 +51,9 @@ st.markdown(f"""
         border-radius: 5px;
         margin-top: 10px;
         background-color: #2b1d1d;
+        color: #ffcccc;
+        font-family: monospace;
+        white-space: pre-wrap;
     }}
     </style>
 """, unsafe_allow_html=True)
@@ -64,13 +68,19 @@ def init_exchange(api_key, api_secret):
         'enableRateLimit': True,
         'nonce': lambda: int(time.time() * 1000000), 
     })
+    # [修復] 嘗試載入標準市場，確保基礎貨幣資料完整
+    try:
+        exchange.load_markets()
+    except Exception as e:
+        print(f"Warning: load_markets failed ({e}), relying on manual injection.")
     return exchange
 
 def force_inject_market(exchange, symbol='fUSD'):
     """
-    強制注入 Funding 市場與貨幣定義
+    強制注入/修補 Funding 市場與貨幣定義
     解決 'uppercaseId', 'market symbol not found' 等所有定義缺失問題
     """
+    # 確保字典已初始化
     if exchange.markets is None: exchange.markets = {}
     if exchange.markets_by_id is None: exchange.markets_by_id = {}
     if exchange.currencies is None: exchange.currencies = {} 
@@ -90,18 +100,19 @@ def force_inject_market(exchange, symbol='fUSD'):
     exchange.markets[symbol] = market_def
     exchange.markets_by_id[symbol] = market_def
     
-    # 2. 強制覆蓋貨幣定義 (USD)
+    # 2. 強制修補貨幣定義 (USD)
+    # 不論 load_markets 是否成功，都檢查並確保 USD 有 uppercaseId
     currency_code = 'USD'
-    usd_def = {
-        'id': currency_code,
-        'code': currency_code,
-        'uppercaseId': currency_code,
-        'name': 'US Dollar',
-        'active': True,
-        'precision': 2,
-        'limits': {'amount': {'min': 0.0}, 'withdraw': {'min': 0.0}}
-    }
-    exchange.currencies[currency_code] = usd_def
+    if currency_code not in exchange.currencies:
+        exchange.currencies[currency_code] = {}
+    
+    # 補齊關鍵欄位
+    usd_def = exchange.currencies[currency_code]
+    if 'id' not in usd_def: usd_def['id'] = currency_code
+    if 'code' not in usd_def: usd_def['code'] = currency_code
+    if 'uppercaseId' not in usd_def: usd_def['uppercaseId'] = currency_code # 這是 ccxt 崩潰的主因
+    if 'precision' not in usd_def: usd_def['precision'] = 2
+    
     exchange.currencies_by_id[currency_code] = usd_def
 
 def to_apy(daily_rate): return float(daily_rate) * 365 * 100
@@ -109,7 +120,7 @@ def to_apy(daily_rate): return float(daily_rate) * 365 * 100
 def fetch_account_data(exchange, currency='USD'):
     """獲取帳戶餘額、收益、掛單、放貸中、最近成交"""
     try:
-        # 強制注入市場與貨幣定義
+        # 每次執行都再次確保定義完整
         force_inject_market(exchange, f'f{currency}')
 
         # 1. Balance
@@ -127,12 +138,15 @@ def fetch_account_data(exchange, currency='USD'):
         active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': f'f{currency}'})
 
         # 5. Recent Trades (最近成交) - 使用 Raw API
-        # 這回傳的是真正的成交紀錄 (Execution)，不是掛單
         raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': f'f{currency}', 'limit': 50})
         
         return usd_bal, ledgers, active_credits, active_offers, raw_trades
     except Exception as e:
-        st.error(f"數據獲取失敗: {e}")
+        # [診斷] 輸出詳細錯誤
+        st.error(f"數據獲取失敗: {str(e)}")
+        if st.checkbox("顯示詳細錯誤追蹤 (Traceback)"):
+            st.code(traceback.format_exc())
+            st.write("Current Currencies Config (USD):", exchange.currencies.get('USD', 'Not Found'))
         return None, [], [], [], []
 
 def process_earnings(ledgers_data):
@@ -273,7 +287,7 @@ if not df_earnings.empty:
     
     if start_date > end_date: start_date = end_date
 
-    # 資料處理
+    # 資料處理：產生完整日期序列並合併收益
     full_date_idx = pd.date_range(start=start_date, end=end_date).date
     df_full_dates = pd.DataFrame(full_date_idx, columns=['date'])
     mask = (df_earnings['date'] >= start_date) & (df_earnings['date'] <= end_date)
@@ -281,7 +295,7 @@ if not df_earnings.empty:
     df_grouped = df_filtered.groupby('date')['amount'].sum().reset_index()
     df_chart = pd.merge(df_full_dates, df_grouped, on='date', how='left').fillna(0)
 
-    # 每日 APY 仍需計算供下方表格使用
+    # 2. 計算每日 APY (當日收益 / 總資產 * 365 * 100)
     if total_assets > 0:
         df_chart['daily_apy'] = (df_chart['amount'] / total_assets) * 365 * 100
     else:
@@ -382,8 +396,7 @@ with t3:
                     rate = float(t[5])
                     period = int(t[6])
                     
-                    # [關鍵修正] 只顯示「借出成交」 (Amount > 0)
-                    # 這樣可以過濾掉還款或無效的交易雜訊
+                    # 只顯示借出成交 (Amount > 0)
                     if amount > 0:
                         trade_data.append({
                             "成交時間": datetime.fromtimestamp(mts/1000).strftime('%m-%d %H:%M'),
@@ -392,7 +405,6 @@ with t3:
                             "天數": period
                         })
             
-            # 只顯示前 20 筆有效成交
             if trade_data:
                 df_trades = pd.DataFrame(trade_data[:20])
                 st.dataframe(df_trades, use_container_width=True, 
