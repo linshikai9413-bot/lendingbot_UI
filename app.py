@@ -23,6 +23,7 @@ TEXT_MAIN = "#E6E6E6"
 TEXT_SUB = "#A1A9B3"
 COLOR_BUY = "#00C896"  # 綠 (收益)
 COLOR_ACCENT = "#4F8BF9" # 藍 (重點)
+COLOR_APY = "#AB47BC" # 紫 (APY 曲線)
 
 st.markdown(f"""
     <style>
@@ -83,8 +84,7 @@ def fetch_account_data(exchange, currency='USD'):
         # 4. Active Offers (掛單中)
         active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': f'f{currency}'})
 
-        # 5. Recent Trades (最近成交) - NEW
-        # Bitfinex 的 funding symbol 通常是 fUSD
+        # 5. Recent Trades (最近成交)
         recent_trades = exchange.fetch_my_trades(symbol=f'f{currency}', limit=20)
         
         return usd_bal, ledgers, active_credits, active_offers, recent_trades
@@ -161,7 +161,6 @@ exchange = init_exchange(st.session_state.api_key, st.session_state.api_secret)
 
 # 獲取數據
 with st.spinner("正在結算收益數據..."):
-    # 新增 loans, offers, trades
     account_bal, raw_ledgers, loans, offers, trades = fetch_account_data(exchange, 'USD')
     df_earnings = process_earnings(raw_ledgers)
 
@@ -209,8 +208,8 @@ col5.metric("全歷史 APY", f"{calculated_apy:.2f}%", help=f"算法：(總收�
 
 st.markdown("---")
 
-# --- 第二層：收益量化圖表 ---
-st.subheader("📊 每日利息收入")
+# --- 第二層：收益量化圖表 + APY 曲線 ---
+st.subheader("📊 每日績效分析")
 
 if not df_earnings.empty:
     range_option = st.radio(
@@ -233,6 +232,7 @@ if not df_earnings.empty:
     
     if start_date > end_date: start_date = end_date
 
+    # 1. 資料處理：產生完整日期序列並合併收益
     full_date_idx = pd.date_range(start=start_date, end=end_date).date
     df_full_dates = pd.DataFrame(full_date_idx, columns=['date'])
     mask = (df_earnings['date'] >= start_date) & (df_earnings['date'] <= end_date)
@@ -240,25 +240,59 @@ if not df_earnings.empty:
     df_grouped = df_filtered.groupby('date')['amount'].sum().reset_index()
     df_chart = pd.merge(df_full_dates, df_grouped, on='date', how='left').fillna(0)
 
+    # 2. 計算每日 APY (當日收益 / 總資產 * 365 * 100)
+    # 注意：這裡假設總資產是固定的 (用當前 total_assets)，若資產變動大則會有誤差，但作為參考已足夠
+    if total_assets > 0:
+        df_chart['daily_apy'] = (df_chart['amount'] / total_assets) * 365 * 100
+    else:
+        df_chart['daily_apy'] = 0.0
+
     if not df_chart.empty:
-        total_in_range = df_chart['amount'].sum()
-        fig = px.bar(
-            df_chart, 
-            x='date', 
-            y='amount',
-            title=f"區間收益 ({range_option}): ${total_in_range:.2f}",
-            labels={'date': '日期', 'amount': '收益 (USD)'},
-            color_discrete_sequence=[COLOR_BUY]
-        )
-        fig.update_layout(
-            plot_bgcolor='rgba(0,0,0,0)', 
-            paper_bgcolor='rgba(0,0,0,0)',
-            hovermode="x unified",
-            xaxis=dict(showgrid=False),
-            yaxis=dict(showgrid=True, gridcolor='#333'),
-            bargap=0.1
-        )
-        st.plotly_chart(fig, use_container_width=True, key=f"earnings_chart_{range_option}")
+        c1, c2 = st.columns(2)
+        
+        # 左圖：每日利息收入 (長條圖)
+        with c1:
+            total_in_range = df_chart['amount'].sum()
+            fig_bar = px.bar(
+                df_chart, 
+                x='date', 
+                y='amount',
+                title=f"💰 區間收益: ${total_in_range:.2f}",
+                labels={'date': '日期', 'amount': '收益 (USD)'},
+                color_discrete_sequence=[COLOR_BUY]
+            )
+            fig_bar.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', 
+                paper_bgcolor='rgba(0,0,0,0)',
+                hovermode="x unified",
+                xaxis=dict(showgrid=False),
+                yaxis=dict(showgrid=True, gridcolor='#333'),
+                bargap=0.1
+            )
+            st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_chart_{range_option}")
+
+        # 右圖：每日績效 APY (折線圖) - NEW
+        with c2:
+            avg_apy_in_range = df_chart['daily_apy'].mean()
+            fig_line = px.line(
+                df_chart, 
+                x='date', 
+                y='daily_apy',
+                title=f"📈 平均 APY: {avg_apy_in_range:.2f}%",
+                labels={'date': '日期', 'daily_apy': '年化報酬率 (%)'},
+                color_discrete_sequence=[COLOR_APY]
+            )
+            # 填充線下區域，增加視覺效果
+            fig_line.update_traces(fill='tozeroy', line=dict(width=3))
+            fig_line.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', 
+                paper_bgcolor='rgba(0,0,0,0)',
+                hovermode="x unified",
+                xaxis=dict(showgrid=False),
+                yaxis=dict(showgrid=True, gridcolor='#333')
+            )
+            st.plotly_chart(fig_line, use_container_width=True, key=f"line_chart_{range_option}")
+
     else:
         st.info(f"{range_option} 區間內無收益數據")
 else:
