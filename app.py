@@ -331,7 +331,7 @@ else:
 # --- 第三層：資產詳細清單 (放貸與掛單) ---
 st.markdown("---")
 st.subheader("📋 資產詳細清單")
-t1, t2, t3, t4 = st.tabs(["正在放貸 (Active Loans)", "掛單中 (Orders)", "最近成交 (Executed Trades)", "每日收益 (Daily Stats)"])
+t1, t2, t3, t4 = st.tabs(["正在放貸 (Active Loans)", "掛單中 (Orders)", "掛單紀錄 (Executed Trades)", "每日收益 (Daily Stats)"])
 
 with t1:
     if loans:
