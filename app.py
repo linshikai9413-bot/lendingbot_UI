@@ -69,11 +69,11 @@ def init_exchange(api_key, api_secret):
 def force_inject_market(exchange, symbol='fUSD'):
     """
     強制注入 Funding 市場與貨幣定義
-    解決 'market symbol not found' 與 'currencies not loaded' 錯誤
+    解決 'market symbol not found', 'currencies not loaded', 'uppercaseId' 錯誤
     """
     if exchange.markets is None: exchange.markets = {}
     if exchange.markets_by_id is None: exchange.markets_by_id = {}
-    if exchange.currencies is None: exchange.currencies = {} # 關鍵修正：初始化貨幣字典
+    if exchange.currencies is None: exchange.currencies = {} 
     
     # 1. 注入市場定義 (fUSD)
     market_def = {
@@ -86,12 +86,13 @@ def force_inject_market(exchange, symbol='fUSD'):
     exchange.markets[symbol] = market_def
     exchange.markets_by_id[symbol] = market_def
     
-    # 2. 注入貨幣定義 (USD) - 解決 fetch_ledger 報錯
+    # 2. 注入貨幣定義 (USD) - [修正] 補上 uppercaseId
     currency_code = 'USD'
     if currency_code not in exchange.currencies:
         exchange.currencies[currency_code] = {
             'id': currency_code,
             'code': currency_code,
+            'uppercaseId': currency_code, # 關鍵修正：這是 ccxt 內部需要的屬性
             'precision': 2,
         }
 
