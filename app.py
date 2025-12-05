@@ -67,7 +67,7 @@ def init_exchange(api_key, api_secret):
 def to_apy(daily_rate): return float(daily_rate) * 365 * 100
 
 def fetch_account_data(exchange, currency='USD'):
-    """獲取帳戶餘額、收益、掛單、放貸中"""
+    """獲取帳戶餘額、收益、掛單、放貸中、最近成交"""
     try:
         # 1. Balance
         balance = exchange.fetch_balance({'type': 'funding'})
@@ -82,11 +82,15 @@ def fetch_account_data(exchange, currency='USD'):
         
         # 4. Active Offers (掛單中)
         active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': f'f{currency}'})
+
+        # 5. Recent Trades (最近成交) - NEW
+        # Bitfinex 的 funding symbol 通常是 fUSD
+        recent_trades = exchange.fetch_my_trades(symbol=f'f{currency}', limit=20)
         
-        return usd_bal, ledgers, active_credits, active_offers
+        return usd_bal, ledgers, active_credits, active_offers, recent_trades
     except Exception as e:
         st.error(f"數據獲取失敗: {e}")
-        return None, [], [], []
+        return None, [], [], [], []
 
 def process_earnings(ledgers_data):
     """處理收益數據，排除雜訊"""
@@ -157,7 +161,8 @@ exchange = init_exchange(st.session_state.api_key, st.session_state.api_secret)
 
 # 獲取數據
 with st.spinner("正在結算收益數據..."):
-    account_bal, raw_ledgers, loans, offers = fetch_account_data(exchange, 'USD')
+    # 新增 loans, offers, trades
+    account_bal, raw_ledgers, loans, offers, trades = fetch_account_data(exchange, 'USD')
     df_earnings = process_earnings(raw_ledgers)
 
 # --- 計算核心指標 ---
@@ -262,7 +267,7 @@ else:
 # --- 第三層：資產詳細清單 (放貸與掛單) ---
 st.markdown("---")
 st.subheader("📋 資產詳細清單")
-t1, t2 = st.tabs(["正在放貸 (Active Loans)", "掛單中 (Orders)"])
+t1, t2, t3 = st.tabs(["正在放貸 (Active Loans)", "掛單中 (Orders)", "最近成交 (Recent Trades)"])
 
 with t1:
     if loans:
@@ -317,6 +322,32 @@ with t2:
                      column_config={"金額 (USD)": st.column_config.NumberColumn(format="$%.2f")})
     else:
         st.info("目前沒有掛單")
+
+with t3:
+    if trades:
+        trade_data = []
+        # 確保按時間倒序 (最新的在前面)
+        sorted_trades = sorted(trades, key=lambda x: x['timestamp'], reverse=True)
+        # 只取前 10 筆
+        top_10_trades = sorted_trades[:10]
+        
+        for t in top_10_trades:
+            # Bitfinex funding trade price is daily rate
+            rate_daily = float(t['price'])
+            amount = float(t['amount'])
+            
+            trade_data.append({
+                "成交時間": datetime.fromtimestamp(t['timestamp']/1000).strftime('%m-%d %H:%M'),
+                "金額 (USD)": abs(amount),
+                "APY": to_apy(rate_daily),
+                "類型": t['side'].upper() if 'side' in t else 'N/A'
+            })
+            
+        df_trades = pd.DataFrame(trade_data)
+        st.dataframe(df_trades, use_container_width=True, 
+                     column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額 (USD)": st.column_config.NumberColumn(format="$%.2f")})
+    else:
+        st.info("目前沒有最近成交紀錄")
 
 # --- 偵錯模式 ---
 if debug_mode:
