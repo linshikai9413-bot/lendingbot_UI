@@ -128,7 +128,7 @@ with st.sidebar:
 
     if st.button("🔄 刷新資料", type="primary", use_container_width=True):
         st.cache_resource.clear()
-        st.experimental_rerun()
+        st.rerun()
 
 # 必要檢查
 if not st.session_state.get("api_key"):
