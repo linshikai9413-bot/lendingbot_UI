@@ -307,6 +307,7 @@ with t1:
     if loans and isinstance(loans, list):
         for l in loans:
             if isinstance(l, list) and len(l) > 10:
+                # 嘗試放寬過濾：只要 Symbol 包含 USD 就顯示
                 sym = str(l[1])
                 if 'USD' not in sym: continue
 
@@ -373,6 +374,7 @@ with t3:
         for t in sorted_trades[:20]:
             if isinstance(t, list) and len(t) >= 7:
                 amt = float(t[4])
+                # 只顯示借出 (Amount > 0)
                 if amt > 0:
                     valid_trades.append({
                         "成交": safe_timestamp_to_datetime(t[2]).strftime('%m-%d %H:%M'),
