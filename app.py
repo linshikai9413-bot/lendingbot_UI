@@ -187,9 +187,30 @@ with st.spinner("更新資料中..."):
 
 # ================== 收益統計與指標 ==================
 df_earn = process_earnings(ledgers)
-usd_info = balances.get("USD", balances.get("usd", {"total": 0, "free": 0}))
-total_assets = float(usd_info.get("total", 0) or 0)
-free_assets = float(usd_info.get("free", 0) or 0)
+
+# --- 修改開始：強制讀取 Funding Wallet (融資錢包) ---
+total_assets = 0.0
+free_assets = 0.0
+
+# 嘗試從原始 info 解析 Funding 錢包
+found_funding = False
+if "info" in balances and isinstance(balances["info"], list):
+    for wallet in balances["info"]:
+        # wallet 結構通常為: [Type, Currency, Total, Interest, Available, ...]
+        # 例如: ["funding", "USD", 745.54, 0, 67.09, ...]
+        if len(wallet) > 4 and wallet[0] == "funding" and wallet[1] == "USD":
+            total_assets = float(wallet[2]) if wallet[2] else 0.0
+            free_assets = float(wallet[4]) if wallet[4] else 0.0
+            found_funding = True
+            break
+
+# 如果沒找到 Funding 錢包，才使用預設 fallback
+if not found_funding:
+    usd_info = balances.get("USD", balances.get("usd", {"total": 0, "free": 0}))
+    total_assets = float(usd_info.get("total", 0) or 0)
+    free_assets = float(usd_info.get("free", 0) or 0)
+# --- 修改結束 ---
+
 utilization = ((total_assets - free_assets) / total_assets * 100) if total_assets > 0 else 0.0
 
 total_income = df_earn["amount"].sum() if not df_earn.empty else 0.0
