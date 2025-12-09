@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import plotly.express as px
 
 # ================= 1. 核心設定 =================
-st.set_page_config(page_title="V14 資產監控 (Debug Mode)", page_icon="🐞", layout="wide")
+st.set_page_config(page_title="V14 資產監控", page_icon="💰", layout="wide")
 
 THEME_BG, THEME_CARD, COLOR_BUY = "#0E1117", "#1C2128", "#00C896"
 st.markdown(f"""
@@ -23,104 +23,89 @@ def to_apy(rate): return float(rate) * 365 * 100
 
 @st.cache_resource
 def init_exchange(api_key, api_secret):
+    # [關鍵修正] 強制去除前後空白，防止 Copy Paste 錯誤
+    safe_key = api_key.strip()
+    safe_secret = api_secret.strip()
+    
     exchange = ccxt.bitfinex({
-        'apiKey': api_key, 'secret': api_secret,
+        'apiKey': safe_key, 
+        'secret': safe_secret,
         'enableRateLimit': True,
         'nonce': lambda: int(time.time() * 1000000), 
     })
-    # 強制注入 (雖然在 Raw API 模式下不一定需要，但以防萬一)
-    try: exchange.load_markets()
-    except: pass
     
+    # [關鍵修正] 像 bot.py 一樣，完全跳過 load_markets()，避免污染 fUSD 定義
+    # exchange.load_markets() <--- DISABLED
+    
+    # 手動注入乾淨的定義
     f_sym = 'fUSD'
-    if exchange.currencies is None: exchange.currencies = {}
-    exchange.currencies['USD'] = {'id': 'USD', 'code': 'USD', 'uppercaseId': 'USD', 'precision': 2}
     
-    if exchange.markets is None: exchange.markets = {}
-    exchange.markets[f_sym] = {'id': f_sym, 'symbol': f_sym, 'base': 'USD', 'quote': 'USD', 'type': 'funding', 'precision': {'amount': 8, 'price': 8}}
+    # 1. 初始化容器
+    exchange.markets = {}
+    exchange.markets_by_id = {}
+    exchange.currencies = {}
+    exchange.currencies_by_id = {}
+    
+    # 2. 注入 USD
+    usd_def = {'id': 'USD', 'code': 'USD', 'uppercaseId': 'USD', 'precision': 2}
+    exchange.currencies['USD'] = usd_def
+    exchange.currencies_by_id['USD'] = usd_def
+    
+    # 3. 注入 fUSD
+    market_def = {
+        'id': f_sym, 'symbol': f_sym, 
+        'base': 'USD', 'quote': 'USD', 'baseId': 'USD', 'quoteId': 'USD',
+        'type': 'funding', 'spot': False, 'margin': False, 'active': True,
+        'precision': {'amount': 8, 'price': 8}
+    }
+    exchange.markets[f_sym] = market_def
+    exchange.markets_by_id[f_sym] = market_def
     
     return exchange
 
-def fetch_data_debug(exchange):
-    """
-    極限偵錯模式：嘗試所有可能的抓取方法
-    """
-    debug_results = {}
-    valid_loans = []
-    valid_offers = []
-    
-    # --- 測試 1: 標準 CCXT 方法 (fetch_funding_credits) ---
+def fetch_data(exchange):
+    """同步 bot.py 的抓取邏輯"""
     try:
-        res = exchange.fetch_funding_credits(symbol='fUSD')
-        debug_results['1_fetch_funding_credits(fUSD)'] = f"Success: {len(res)} items"
-        if res: valid_loans = res # 如果這個成功，優先使用
-    except Exception as e:
-        debug_results['1_fetch_funding_credits(fUSD)'] = f"Error: {str(e)}"
-
-    # --- 測試 2: Raw API (無參數) ---
-    try:
-        res = exchange.private_post_auth_r_funding_credits()
-        debug_results['2_private_credits()'] = f"Success: {len(res)} items"
-    except Exception as e:
-        debug_results['2_private_credits()'] = f"Error: {str(e)}"
-
-    # --- 測試 3: Raw API (params={'symbol': 'fUSD'}) --- [Bot.py 用法]
-    try:
-        res = exchange.private_post_auth_r_funding_credits(params={'symbol': 'fUSD'})
-        debug_results['3_private_credits(params=fUSD)'] = f"Success: {len(res)} items"
-        # 如果這是 Raw 格式，我們需要手動轉換才能給 UI 用
-        if res and isinstance(res, list) and len(res) > 0 and isinstance(res[0], list):
-             # 暫存 Raw Data 供下方顯示
-             valid_loans = res 
-    except Exception as e:
-        debug_results['3_private_credits(params=fUSD)'] = f"Error: {str(e)}"
-
-    # --- 測試 4: Raw API (params={'symbol': 'USD'}) --- [嘗試 USD]
-    try:
-        res = exchange.private_post_auth_r_funding_credits(params={'symbol': 'USD'})
-        debug_results['4_private_credits(params=USD)'] = f"Success: {len(res)} items"
-    except Exception as e:
-        debug_results['4_private_credits(params=USD)'] = f"Error: {str(e)}"
-
-    # --- 測試 5: Raw API (_symbol 方法) ---
-    try:
-        res = exchange.private_post_auth_r_funding_credits_symbol({'symbol': 'fUSD'})
-        debug_results['5_private_credits_symbol(fUSD)'] = f"Success: {len(res)} items"
-    except Exception as e:
-        debug_results['5_private_credits_symbol(fUSD)'] = f"Error: {str(e)}"
-
-    # 同樣測試 Offers
-    try:
-        res = exchange.private_post_auth_r_funding_offers(params={'symbol': 'fUSD'})
-        valid_offers = res
-    except: pass
-
-    # 獲取其他基礎數據
-    try:
+        # 1. 餘額
         bal = exchange.fetch_balance({'type': 'funding'})
-        ledgers = exchange.fetch_ledger('USD', limit=1000)
+        
+        # 2. 帳本
+        since = exchange.milliseconds() - (365 * 86400 * 1000)
+        ledgers = exchange.fetch_ledger('USD', since=since, limit=2500)
+        
+        # 3. [關鍵修正] 使用與 bot.py 完全一致的參數寫法
+        # Bot.py 用法: private_post_auth_r_funding_credits(params={'symbol': 'fUSD'})
+        credits = exchange.private_post_auth_r_funding_credits(params={'symbol': 'fUSD'})
+        offers = exchange.private_post_auth_r_funding_offers(params={'symbol': 'fUSD'})
+        
+        # 4. 最近成交 (Raw API)
         trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': 'fUSD', 'limit': 50})
+        
+        return bal, ledgers, credits, offers, trades
     except Exception as e:
-        st.error(f"基礎數據錯誤: {e}")
-        return None, [], [], [], [], debug_results
-
-    return bal, ledgers, valid_loans, valid_offers, trades, debug_results
+        st.error(f"API Error: {e}")
+        return None, [], [], [], []
 
 def process_earnings(ledgers):
     data = []
     if not ledgers: return pd.DataFrame()
+    
     for e in ledgers:
         amt = float(e.get('amount', 0))
         if amt <= 0: continue
+        
         typ = str(e.get('type', '')).lower()
         desc = str(e.get('description', '')).lower()
+        
         if any(x in typ for x in ['trans', 'depo', 'with']): continue
+        
         if 'payout' in typ or 'funding' in desc:
             data.append({'date': ts_to_date(e['timestamp']).date(), 'amount': amt})
+            
     return pd.DataFrame(data)
 
 # ================= 3. 主程式 =================
-st.title("🐞 V14 資產監控 (極限偵錯版)")
+st.title("💰 V14 資產監控")
 
 with st.sidebar:
     st.header("⚙️ 設定")
@@ -135,6 +120,7 @@ with st.sidebar:
         st.session_state.api_key = st.text_input("API Key", type="password")
         st.session_state.api_secret = st.text_input("API Secret", type="password")
         
+    debug_mode = st.checkbox("🐞 Debug")
     if st.button("🔄 刷新", type="primary"):
         st.cache_resource.clear()
         st.rerun()
@@ -144,40 +130,68 @@ if not st.session_state.api_key:
 
 exchange = init_exchange(st.session_state.api_key, st.session_state.api_secret)
 
-with st.spinner("偵錯中..."):
-    bal_data, raw_ledgers, loans, offers, trades, debug_log = fetch_data_debug(exchange)
+with st.spinner("載入數據..."):
+    bal_data, raw_ledgers, loans, offers, trades = fetch_data(exchange)
     df_earn = process_earnings(raw_ledgers)
 
-# --- 顯示偵錯結果 ---
-st.subheader("🔍 API 抓取測試結果")
-st.json(debug_log)
-
-st.markdown("---")
-
-# --- 正常顯示區 (如果有的話) ---
+# --- 計算 ---
 usd = bal_data.get('USD', {'total': 0, 'free': 0}) if bal_data else {'total': 0, 'free': 0}
 total_asset = float(usd['total'])
 utilization = ((total_asset - float(usd['free'])) / total_asset * 100) if total_asset > 0 else 0
-total_inc = df_earn['amount'].sum() if not df_earn.empty else 0
 
-c1, c2, c3 = st.columns(3)
+total_inc = df_earn['amount'].sum() if not df_earn.empty else 0
+d30 = pd.Timestamp.now().date() - timedelta(days=30)
+inc_30d = df_earn[df_earn['date'] >= d30]['amount'].sum() if not df_earn.empty else 0
+
+apy_hist = 0
+if not df_earn.empty and total_asset > 0:
+    days = (pd.Timestamp.now().date() - df_earn['date'].min()).days + 1
+    apy_hist = (total_inc / days / total_asset) * 365 * 100
+
+# --- 指標顯示 ---
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("總資產", f"${total_asset:,.2f}")
 c2.metric("資金利用率", f"{utilization:.1f}%")
-c3.metric("歷史總收益", f"${total_inc:,.2f}")
+c3.metric("30天收益", f"${inc_30d:,.2f}")
+c4.metric("歷史總收益", f"${total_inc:,.2f}")
+c5.metric("全歷史 APY", f"{apy_hist:.2f}%")
 
 st.markdown("---")
-t1, t2 = st.tabs(["放貸中 (Loans)", "掛單中 (Orders)"])
+
+# --- 圖表 ---
+st.subheader("📊 每日績效")
+if not df_earn.empty:
+    rng = st.radio("範圍", ["7天", "30天", "1年", "全部"], index=1, horizontal=True)
+    end_d = pd.Timestamp.now().date()
+    start_d = df_earn['date'].min()
+    if rng == "7天": start_d = end_d - timedelta(days=7)
+    elif rng == "30天": start_d = end_d - timedelta(days=30)
+    elif rng == "1年": start_d = end_d - timedelta(days=365)
+    
+    full_d = pd.DataFrame(pd.date_range(max(start_d, df_earn['date'].min()), end_d).date, columns=['date'])
+    mask = (df_earn['date'] >= start_d) & (df_earn['date'] <= end_d)
+    chart_data = df_earn.loc[mask].groupby('date')['amount'].sum().reset_index()
+    chart_data = pd.merge(full_d, chart_data, on='date', how='left').fillna(0)
+    
+    chart_data['apy'] = (chart_data['amount'] / total_asset * 36500) if total_asset > 0 else 0
+
+    fig = px.bar(chart_data, x='date', y='amount', title=f"區間收益: ${chart_data['amount'].sum():.2f}", color_discrete_sequence=[COLOR_BUY])
+    fig.update_layout(plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor='#333'), height=350)
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("無收益資料")
+
+# --- 明細 ---
+st.markdown("---")
+t1, t2, t3, t4 = st.tabs(["放貸中", "掛單中", "最近成交", "每日收益"])
 
 with t1:
     if loans:
-        st.write("Raw Loans Data:", loans) # 直接顯示原始資料
         d = []
         for l in loans:
-            # 兼容 Raw List 格式 [ID, SYM, ..., AMT, ..., RATE, PERIOD]
-            if isinstance(l, list) and len(l) > 10:
+            # 寬鬆解析: 只要是 list 且 symbol 是 fUSD (通常 id=0, sym=1)
+            if isinstance(l, list) and len(l) > 10 and 'USD' in str(l[1]):
                 try:
-                    # 嘗試解析 Raw List
-                    # 通常: 3=Created, 5=Amount, 11=Rate, 12=Period
                     created = ts_to_date(l[3])
                     amt = abs(float(l[5]))
                     rate = float(l[11])
@@ -188,25 +202,63 @@ with t1:
                         "金額": amt,
                         "APY": to_apy(rate),
                         "天數": period,
+                        "剩餘": f"{max(0, (due - datetime.now()).total_seconds()/86400):.1f} 天",
                         "到期": due.strftime('%m-%d %H:%M')
                     })
                 except: pass
-            # 兼容 Dict 格式 (如果 fetch_funding_credits 成功)
-            elif isinstance(l, dict):
-                try:
-                    d.append({
-                        "開單日期": datetime.fromtimestamp(l['timestamp']/1000).strftime('%m-%d %H:%M'),
-                        "金額": l['amount'],
-                        "APY": to_apy(l['rate']),
-                        "天數": l['period'],
-                        "到期": "N/A"
-                    })
-                except: pass
-        
-        if d: st.dataframe(pd.DataFrame(d))
-    else: st.info("無放貸資料")
+        if d: st.dataframe(pd.DataFrame(d).sort_values("APY", ascending=False), use_container_width=True, column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
+        else: st.info("無放貸資料")
+    else: st.info("目前無放貸")
 
 with t2:
     if offers:
-        st.write("Raw Offers Data:", offers)
+        d = []
+        for o in offers:
+            if isinstance(o, list) and len(o) > 10 and 'USD' in str(o[1]):
+                try:
+                    created = ts_to_date(o[2])
+                    amt = float(o[4])
+                    rate = float(o[14])
+                    period = int(o[15])
+                    d.append({
+                        "金額": amt,
+                        "類型": "FRR" if rate==0 else "Limit",
+                        "APY": "FRR" if rate==0 else f"{to_apy(rate):.2f}%",
+                        "天數": period,
+                        "建立": created.strftime('%m-%d %H:%M')
+                    })
+                except: pass
+        if d: st.dataframe(pd.DataFrame(d), use_container_width=True, column_config={"金額": st.column_config.NumberColumn(format="$%.2f")})
+        else: st.info("無掛單資料")
     else: st.info("無掛單")
+
+with t3:
+    if trades and isinstance(trades, list):
+        d = []
+        for t in sorted(trades, key=lambda x: x[2] if len(x)>2 else 0, reverse=True)[:20]:
+            if isinstance(t, list) and len(t) >= 7:
+                try:
+                    amt = float(t[4])
+                    if amt > 0: # 只顯示借出
+                        d.append({
+                            "成交時間": ts_to_date(t[2]).strftime('%m-%d %H:%M'),
+                            "金額": abs(amt),
+                            "APY": to_apy(t[5]),
+                            "天數": int(t[6])
+                        })
+                except: pass
+        if d: st.dataframe(pd.DataFrame(d), use_container_width=True, column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
+        else: st.info("無最近借出紀錄")
+    else: st.info("無成交紀錄")
+
+with t4:
+    if 'chart_data' in locals() and not chart_data.empty:
+        df_show = chart_data.sort_values('date', ascending=False)[['date', 'amount', 'apy']]
+        df_show.columns = ['日期', '收益 (USD)', '當日 APY']
+        st.dataframe(df_show, use_container_width=True, column_config={"日期": st.column_config.DateColumn(format="YYYY-MM-DD"), "收益 (USD)": st.column_config.NumberColumn(format="$%.2f"), "當日 APY": st.column_config.NumberColumn(format="%.2f%%")})
+    else: st.info("無數據")
+
+if debug_mode:
+    st.markdown("---")
+    st.write("▼ Raw Loans:", loans)
+    st.write("▼ Raw Offers:", offers)
