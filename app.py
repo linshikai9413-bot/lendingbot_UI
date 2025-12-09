@@ -7,7 +7,7 @@ import plotly.express as px
 
 # ================= 1. 設定與樣式 =================
 st.set_page_config(
-    page_title="V14 資產監控 (Debug版)",
+    page_title="V14 資產監控 (Pro)",
     page_icon="💰",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -19,6 +19,7 @@ THEME_CARD = "#1C2128"
 TEXT_MAIN = "#E6E6E6"
 TEXT_SUB = "#A1A9B3"
 COLOR_BUY = "#00C896"
+COLOR_SELL = "#FF4B4B"
 
 st.markdown(f"""
     <style>
@@ -97,26 +98,41 @@ def init_exchange(api_key, api_secret):
     return exchange
 
 def fetch_data(exchange):
-    """一次獲取所有需要的數據"""
+    """一次獲取所有需要的數據 (標準化版本)"""
     try:
         init_exchange(exchange.apiKey, exchange.secret)
         symbol = 'fUSD'
 
-        # 平行獲取數據
+        # 1. 餘額
         balance = exchange.fetch_balance({'type': 'funding'})
         
+        # 2. 帳本歷史 (收益)
         since_1y = exchange.milliseconds() - (365 * 24 * 60 * 60 * 1000)
         ledgers = exchange.fetch_ledger('USD', since=since_1y, limit=2500)
         
-        # 這裡的 endpoint 回傳 raw list
-        active_credits = exchange.private_post_auth_r_funding_credits(params={'symbol': symbol})
-        active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': symbol})
+        # 3. 放貸中 (使用標準 CCXT 方法)
+        # 這會自動處理 API 格式，回傳 list of dict
+        try:
+            active_credits = exchange.fetch_funding_credits(symbol)
+        except Exception as e:
+            # Fallback 如果標準方法失敗，可能是權限問題
+            active_credits = []
+            print(f"Fetch credits failed: {e}")
+
+        # 4. 掛單中 (使用標準 CCXT 方法)
+        try:
+            active_offers = exchange.fetch_open_orders(symbol)
+        except Exception as e:
+            active_offers = []
+            print(f"Fetch offers failed: {e}")
+
+        # 5. 最近成交 (維持 Raw Call 以確保取得詳細歷史)
         raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': symbol, 'limit': 50})
         
         return balance, ledgers, active_credits, active_offers, raw_trades
+
     except Exception as e:
-        st.error(f"API 連線錯誤: {str(e)}")
-        # 回傳空結構以防崩潰
+        st.error(f"API 連線異常: {str(e)}")
         return None, [], [], [], []
 
 def process_earnings(ledgers):
@@ -168,10 +184,8 @@ with st.sidebar:
         st.session_state.api_key = st.text_input("API Key", type="password")
         st.session_state.api_secret = st.text_input("API Secret", type="password")
 
-    # === [DEBUG 新增功能] ===
     st.markdown("---")
-    debug_mode = st.checkbox("🐞 開啟除錯模式 (Debug Mode)", value=False)
-    # ======================
+    debug_mode = st.checkbox("🐞 除錯模式 (Debug Mode)", value=False)
 
     if st.button("🔄 刷新數據", type="primary", use_container_width=True):
         st.cache_resource.clear()
@@ -262,55 +276,94 @@ else:
 # 第三層：明細
 st.markdown("---")
 st.subheader("📋 資產明細")
-t1, t2, t3, t4 = st.tabs(["放貸中 (Active Loans)", "掛單中 (Active Offers)", "最近成交 (Trades)", "每日收益 (Earnings)"])
+t1, t2, t3, t4 = st.tabs(["放貸中 (Loans)", "掛單中 (Offers)", "最近成交 (Trades)", "每日收益 (Earnings)"])
 
 with t1:
     if loans:
-        # === [DEBUG] ===
-        # 原本邏輯：檢查 len(l) >= 13，如果不符合就不顯示，導致你看不到資料
-        # 新邏輯：先收集資料，如果有問題，Debug 模式會顯示原始結構
         data = []
         for l in loans:
-            # 這裡暫時保留你的判斷，但如果格式變了，這裡就是問題點
-            if len(l) >= 13:
-                created = safe_timestamp_to_datetime(l[3])
-                days = int(l[12]) # 若 API 變動，12 可能是錯的索引
+            try:
+                # 兼容處理：CCXT標準物件 vs Raw List
+                if isinstance(l, dict):
+                    # 標準 CCXT 格式
+                    amount = float(l.get('amount', 0))
+                    rate = float(l.get('rate', 0))
+                    created = safe_timestamp_to_datetime(l.get('timestamp'))
+                    # 嘗試從 info 獲取天數，預設 2 天
+                    info = l.get('info', {})
+                    days = int(info.get('period', 2)) if info else 2
+                elif isinstance(l, list) and len(l) >= 12:
+                    # 原始 Raw 格式 (Fallback)
+                    created = safe_timestamp_to_datetime(l[3])
+                    amount = abs(float(l[5]))
+                    rate = float(l[11])
+                    days = int(l[12])
+                else:
+                    continue
+
                 due = created + timedelta(days=days)
                 remain = max(0.0, (due - datetime.now()).total_seconds() / 86400)
                 
                 data.append({
                     "開單": created.strftime('%m-%d %H:%M'),
-                    "金額": abs(float(l[5])),
-                    "APY": to_apy(l[11]),
+                    "金額": amount,
+                    "APY": to_apy(rate),
                     "天數": days,
                     "剩餘": f"{remain:.1f} 天",
                     "到期": due.strftime('%m-%d %H:%M')
                 })
+            except Exception as e:
+                pass # Skip problematic rows
         
         if data:
             st.dataframe(pd.DataFrame(data).sort_values("APY", ascending=False), use_container_width=True,
                         column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
         else:
-            st.warning("⚠️ 有收到 API 數據，但格式解析後為空。請開啟除錯模式檢查欄位索引。")
+            st.info("無放貸")
     else:
-        st.info("無放貸 (API 回傳為空)")
+        st.info("無放貸 (請確認 API 權限 'Margin Funding' 是否開啟)")
 
 with t2:
     if offers:
         data = []
         for o in offers:
-            if len(o) >= 16:
-                rate = float(o[14])
-                is_frr = rate == 0
+            try:
+                # 兼容處理
+                if isinstance(o, dict):
+                    amount = float(o.get('amount', 0))
+                    rate = float(o.get('price', 0)) # 在 Open Orders 裡，rate 通常在 price 欄位
+                    created = safe_timestamp_to_datetime(o.get('timestamp'))
+                    # 判斷 FRR
+                    flags = o.get('info', {}).get('flags', 0)
+                    is_frr = (flags & 1024) > 0 or rate == 0 # Bitfinex flag 1024 is FRR usually
+                    
+                    info = o.get('info', {})
+                    days = int(info.get('period', 2)) if info else 2
+                    
+                elif isinstance(o, list) and len(o) >= 15:
+                    rate = float(o[14])
+                    is_frr = rate == 0
+                    amount = float(o[4])
+                    days = int(o[15])
+                    created = safe_timestamp_to_datetime(o[2])
+                else:
+                    continue
+
                 data.append({
-                    "金額": float(o[4]),
+                    "金額": amount,
                     "類型": "FRR" if is_frr else "Limit",
                     "APY": "FRR" if is_frr else f"{to_apy(rate):.2f}%",
-                    "天數": int(o[15]),
-                    "建立": safe_timestamp_to_datetime(o[2]).strftime('%m-%d %H:%M')
+                    "天數": days,
+                    "建立": created.strftime('%m-%d %H:%M')
                 })
-        st.dataframe(pd.DataFrame(data), use_container_width=True,
-                     column_config={"金額": st.column_config.NumberColumn(format="$%.2f")})
+            except Exception as e:
+                pass
+
+        if data:
+            st.dataframe(pd.DataFrame(data), use_container_width=True,
+                        column_config={"金額": st.column_config.NumberColumn(format="$%.2f")})
+        else:
+            st.info("無掛單")
     else:
         st.info("無掛單")
 
@@ -349,20 +402,13 @@ with t4:
     else:
         st.info("無數據")
 
-# ================= [DEBUG] 除錯專區 =================
+# ================= DEBUG 專區 =================
 if debug_mode:
     st.markdown("---")
-    st.error("🚧 DEBUG MODE ACTIVATED 🚧")
-    
-    st.subheader("1. 原始 Active Loans (Credits) 數據")
-    st.caption("如果這裡是空的 []，代表 API 設定錯誤或沒有權限讀取 Funding Credits。如果這裡有數據但上方表格沒顯示，代表 len(l) >= 13 判斷錯誤。")
-    st.json(loans)
-    
-    st.subheader("2. 原始 Active Offers 數據")
-    st.json(offers)
-    
-    st.subheader("3. 原始 Trades 數據 (前 5 筆)")
-    st.write(trades[:5] if trades else "No Trades")
-    
-    st.subheader("4. 餘額與利用率")
-    st.json(usd_bal)
+    st.error("🚧 DEBUG MODE 🚧")
+    st.write("Current API Permissions Check:")
+    if not loans: st.warning("Loans list is empty. Check 'Margin Funding' -> 'Read' permission.")
+    st.subheader("Raw Loans Data")
+    st.write(loans)
+    st.subheader("Raw Offers Data")
+    st.write(offers)
