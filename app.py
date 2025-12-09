@@ -46,9 +46,9 @@ def init_exchange(api_key, api_secret):
     exchange.currencies['USD'] = {'id': 'USD', 'code': 'USD', 'uppercaseId': 'USD', 'precision': 2}
     exchange.currencies_by_id['USD'] = exchange.currencies['USD']
     
-    # 2. 確保 Markets 初始化 (關鍵修復)
+    # 2. 確保 Markets 初始化 (防止 NoneType error)
     if exchange.markets is None: exchange.markets = {}
-    if exchange.markets_by_id is None: exchange.markets_by_id = {} # [Fix] 防止 NoneType error
+    if exchange.markets_by_id is None: exchange.markets_by_id = {} 
     
     market_def = {'id': f_sym, 'symbol': f_sym, 'base': 'USD', 'quote': 'USD', 'type': 'funding', 'precision': {'amount': 8, 'price': 8}}
     exchange.markets[f_sym] = market_def
@@ -67,7 +67,6 @@ def fetch_data(exchange):
         ledgers = exchange.fetch_ledger('USD', since=since, limit=2500)
         
         # 3. 放貸與掛單 (使用 bot.py 驗證過的方法)
-        # 注意: 這裡 params 必須包含 symbol
         credits = exchange.private_post_auth_r_funding_credits(params={'symbol': 'fUSD'})
         offers = exchange.private_post_auth_r_funding_offers(params={'symbol': 'fUSD'})
         
@@ -80,15 +79,24 @@ def fetch_data(exchange):
         return None, [], [], [], []
 
 def process_earnings(ledgers):
+    """處理收益數據 (修復 KeyError)"""
     data = []
     if not ledgers: return pd.DataFrame()
     
     for e in ledgers:
-        amt = float(e['amount'])
+        # [Fix] 使用 .get() 安全讀取，避免 KeyError
+        amt = float(e.get('amount', 0))
+        
         # 過濾非收益項目
         if amt <= 0: continue
-        if any(x in e['type'].lower() for x in ['trans', 'depo', 'with']): continue
-        if 'payout' in e['type'] or 'funding' in str(e['description']).lower():
+        
+        # 安全讀取字串欄位
+        typ = str(e.get('type', '')).lower()
+        desc = str(e.get('description', '')).lower()
+        
+        if any(x in typ for x in ['trans', 'depo', 'with']): continue
+        
+        if 'payout' in typ or 'funding' in desc:
             data.append({'date': ts_to_date(e['timestamp']).date(), 'amount': amt})
             
     return pd.DataFrame(data)
@@ -179,7 +187,6 @@ with t1:
     if loans:
         d = []
         for l in loans:
-            # 確保是 fUSD (Symbol 在 index 1)
             if len(l) > 12 and 'USD' in str(l[1]):
                 created = ts_to_date(l[3])
                 days = int(l[12])
@@ -189,7 +196,7 @@ with t1:
                     "金額": abs(float(l[5])),
                     "APY": to_apy(l[11]),
                     "天數": days,
-                    "剩餘": f"{max(0, (due - datetime.now()).days)} 天",
+                    "剩餘": f"{max(0, (due - datetime.now()).total_seconds()/86400):.1f} 天",
                     "到期": due.strftime('%m-%d %H:%M')
                 })
         if d: st.dataframe(pd.DataFrame(d).sort_values("APY", ascending=False), use_container_width=True, column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
