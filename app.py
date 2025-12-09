@@ -107,6 +107,15 @@ def process_earnings(ledgers):
             amt = float(r.get("amount", 0))
             if amt <= 0:
                 continue
+            
+            # --- 修改開始：增加過濾條件 ---
+            # 取得交易描述 (有些在 info 裡，有些直接在 description)
+            desc = r.get("description", "") or r.get("info", {}).get("description", "")
+            # 如果描述中不包含 "Margin Funding Payment" (利息支付)，就跳過 (過濾掉轉帳/入金)
+            if "Margin Funding Payment" not in desc:
+                continue
+            # --- 修改結束 ---
+
             ts = r.get("timestamp") or r.get("mts") or r.get("date")
             dt = safe_dt(ts)
             recs.append({"date": dt.date(), "datetime": dt, "amount": amt})
