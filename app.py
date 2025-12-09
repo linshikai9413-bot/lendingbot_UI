@@ -29,24 +29,17 @@ def init_exchange(api_key, api_secret):
         'nonce': lambda: int(time.time() * 1000000), 
     })
     
-    # 嘗試載入市場
-    try:
-        exchange.load_markets()
-    except Exception as e:
-        print(f"Market load failed: {e}")
+    try: exchange.load_markets()
+    except: pass # 忽略載入錯誤，改用手動注入
 
-    # 強制注入定義 (防止 CCXT 報錯)
+    # 強制注入 USD 與 fUSD 定義 (與 bot.py 邏輯一致)
     f_sym = 'fUSD'
-    
-    # 1. 確保 Currencies 初始化
     if exchange.currencies is None: exchange.currencies = {}
-    if not hasattr(exchange, 'currencies_by_id') or exchange.currencies_by_id is None: 
-        exchange.currencies_by_id = {}
+    if not hasattr(exchange, 'currencies_by_id') or exchange.currencies_by_id is None: exchange.currencies_by_id = {}
     
     exchange.currencies['USD'] = {'id': 'USD', 'code': 'USD', 'uppercaseId': 'USD', 'precision': 2}
     exchange.currencies_by_id['USD'] = exchange.currencies['USD']
     
-    # 2. 確保 Markets 初始化 (防止 NoneType error)
     if exchange.markets is None: exchange.markets = {}
     if exchange.markets_by_id is None: exchange.markets_by_id = {} 
     
@@ -57,7 +50,9 @@ def init_exchange(api_key, api_secret):
     return exchange
 
 def fetch_data(exchange):
-    """同步 bot.py 的抓取邏輯"""
+    """
+    [修正] 使用與 bot.py 完全相同的抓取邏輯
+    """
     try:
         # 1. 餘額
         bal = exchange.fetch_balance({'type': 'funding'})
@@ -66,7 +61,8 @@ def fetch_data(exchange):
         since = exchange.milliseconds() - (365 * 86400 * 1000)
         ledgers = exchange.fetch_ledger('USD', since=since, limit=2500)
         
-        # 3. 放貸與掛單 (使用 bot.py 驗證過的方法)
+        # 3. 放貸與掛單 (關鍵修正：使用 params 傳遞 symbol，而非 _symbol 方法)
+        # 這是 bot.py 能成功抓到的關鍵寫法
         credits = exchange.private_post_auth_r_funding_credits(params={'symbol': 'fUSD'})
         offers = exchange.private_post_auth_r_funding_offers(params={'symbol': 'fUSD'})
         
@@ -79,18 +75,14 @@ def fetch_data(exchange):
         return None, [], [], [], []
 
 def process_earnings(ledgers):
-    """處理收益數據 (修復 KeyError)"""
+    """處理收益數據"""
     data = []
     if not ledgers: return pd.DataFrame()
     
     for e in ledgers:
-        # [Fix] 使用 .get() 安全讀取，避免 KeyError
         amt = float(e.get('amount', 0))
-        
-        # 過濾非收益項目
         if amt <= 0: continue
         
-        # 安全讀取字串欄位
         typ = str(e.get('type', '')).lower()
         desc = str(e.get('description', '')).lower()
         
@@ -187,35 +179,46 @@ with t1:
     if loans:
         d = []
         for l in loans:
-            if len(l) > 12 and 'USD' in str(l[1]):
-                created = ts_to_date(l[3])
-                days = int(l[12])
-                due = created + timedelta(days=days)
-                d.append({
-                    "開單日期": created.strftime('%m-%d %H:%M'),
-                    "金額": abs(float(l[5])),
-                    "APY": to_apy(l[11]),
-                    "天數": days,
-                    "剩餘": f"{max(0, (due - datetime.now()).total_seconds()/86400):.1f} 天",
-                    "到期": due.strftime('%m-%d %H:%M')
-                })
+            # 放寬檢查：只要是 list 且 symbol 是 fUSD 就顯示
+            if isinstance(l, list) and len(l) > 10 and 'USD' in str(l[1]):
+                try:
+                    # 嘗試讀取，失敗則跳過
+                    created = ts_to_date(l[3])
+                    amt = abs(float(l[5]))
+                    rate = float(l[11])
+                    period = int(l[12])
+                    due = created + timedelta(days=period)
+                    d.append({
+                        "開單日期": created.strftime('%m-%d %H:%M'),
+                        "金額": amt,
+                        "APY": to_apy(rate),
+                        "天數": period,
+                        "剩餘": f"{max(0, (due - datetime.now()).total_seconds()/86400):.1f} 天",
+                        "到期": due.strftime('%m-%d %H:%M')
+                    })
+                except: pass
         if d: st.dataframe(pd.DataFrame(d).sort_values("APY", ascending=False), use_container_width=True, column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
-        else: st.info("無放貸資料 (已過濾非 USD)")
+        else: st.info("無放貸資料 (API 回傳空或格式不符)")
     else: st.info("目前無放貸")
 
 with t2:
     if offers:
         d = []
         for o in offers:
-            if len(o) > 15 and 'USD' in str(o[1]):
-                rate = float(o[14])
-                d.append({
-                    "金額": float(o[4]),
-                    "類型": "FRR" if rate==0 else "Limit",
-                    "APY": "FRR" if rate==0 else f"{to_apy(rate):.2f}%",
-                    "天數": int(o[15]),
-                    "建立": ts_to_date(o[2]).strftime('%m-%d %H:%M')
-                })
+            if isinstance(o, list) and len(o) > 10 and 'USD' in str(o[1]):
+                try:
+                    created = ts_to_date(o[2])
+                    amt = float(o[4])
+                    rate = float(o[14])
+                    period = int(o[15])
+                    d.append({
+                        "金額": amt,
+                        "類型": "FRR" if rate==0 else "Limit",
+                        "APY": "FRR" if rate==0 else f"{to_apy(rate):.2f}%",
+                        "天數": period,
+                        "建立": created.strftime('%m-%d %H:%M')
+                    })
+                except: pass
         if d: st.dataframe(pd.DataFrame(d), use_container_width=True, column_config={"金額": st.column_config.NumberColumn(format="$%.2f")})
         else: st.info("無掛單資料")
     else: st.info("無掛單")
@@ -223,11 +226,11 @@ with t2:
 with t3:
     if trades and isinstance(trades, list):
         d = []
-        # 按時間倒序
-        for t in sorted(trades, key=lambda x: x[2], reverse=True)[:20]:
-            if len(t) >= 7:
+        for t in sorted(trades, key=lambda x: x[2] if len(x)>2 else 0, reverse=True)[:20]:
+            if isinstance(t, list) and len(t) >= 7:
                 amt = float(t[4])
-                if amt > 0: # 只顯示借出
+                # [關鍵修正] 嚴格過濾：只顯示正數金額 (借出)
+                if amt > 0:
                     d.append({
                         "成交時間": ts_to_date(t[2]).strftime('%m-%d %H:%M'),
                         "金額": abs(amt),
@@ -235,7 +238,7 @@ with t3:
                         "天數": int(t[6])
                     })
         if d: st.dataframe(pd.DataFrame(d), use_container_width=True, column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
-        else: st.info("無最近借出紀錄")
+        else: st.info("無最近借出成交")
     else: st.info("無成交紀錄")
 
 with t4:
