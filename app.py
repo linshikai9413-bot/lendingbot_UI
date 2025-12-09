@@ -28,17 +28,31 @@ def init_exchange(api_key, api_secret):
         'enableRateLimit': True,
         'nonce': lambda: int(time.time() * 1000000), 
     })
+    
+    # 嘗試載入市場
+    try:
+        exchange.load_markets()
+    except Exception as e:
+        print(f"Market load failed: {e}")
+
     # 強制注入定義 (防止 CCXT 報錯)
     f_sym = 'fUSD'
+    
+    # 1. 確保 Currencies 初始化
     if exchange.currencies is None: exchange.currencies = {}
-    if not hasattr(exchange, 'currencies_by_id') or exchange.currencies_by_id is None: exchange.currencies_by_id = {}
+    if not hasattr(exchange, 'currencies_by_id') or exchange.currencies_by_id is None: 
+        exchange.currencies_by_id = {}
     
     exchange.currencies['USD'] = {'id': 'USD', 'code': 'USD', 'uppercaseId': 'USD', 'precision': 2}
     exchange.currencies_by_id['USD'] = exchange.currencies['USD']
     
+    # 2. 確保 Markets 初始化 (關鍵修復)
     if exchange.markets is None: exchange.markets = {}
-    exchange.markets[f_sym] = {'id': f_sym, 'symbol': f_sym, 'base': 'USD', 'quote': 'USD', 'type': 'funding', 'precision': {'amount': 8, 'price': 8}}
-    exchange.markets_by_id[f_sym] = exchange.markets[f_sym]
+    if exchange.markets_by_id is None: exchange.markets_by_id = {} # [Fix] 防止 NoneType error
+    
+    market_def = {'id': f_sym, 'symbol': f_sym, 'base': 'USD', 'quote': 'USD', 'type': 'funding', 'precision': {'amount': 8, 'price': 8}}
+    exchange.markets[f_sym] = market_def
+    exchange.markets_by_id[f_sym] = market_def
     
     return exchange
 
