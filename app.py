@@ -69,7 +69,7 @@ load_api_from_secrets_into_session()
 # ================== Exchange 初始化（強制 bitfinex2） ==================
 @st.cache_resource
 def init_exchange(api_key, api_secret):
-    ex = ccxt.bitfinex2({
+    ex = ccxt.bitfinex({
         "apiKey": api_key,
         "secret": api_secret,
         "enableRateLimit": True,
