@@ -13,7 +13,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 風格設定
 THEME_BG = "#0E1117"
 THEME_CARD = "#1C2128"
 TEXT_MAIN = "#E6E6E6"
@@ -33,20 +32,29 @@ st.markdown(f"""
     div[data-testid="stMetric"] label {{ font-size: 0.9rem; color: {TEXT_SUB}; }}
     div[data-testid="stMetric"] div[data-testid="stMetricValue"] {{ font-size: 1.6rem; color: {COLOR_BUY}; }}
     div[data-testid="stDataFrame"] {{ border: 1px solid #30363D; border-radius: 8px; }}
+    
+    .debug-box {{
+        border: 1px solid #FF5252;
+        padding: 10px;
+        border-radius: 5px;
+        margin-top: 10px;
+        background-color: #2b1d1d;
+        color: #ffcccc;
+        font-family: monospace;
+        white-space: pre-wrap;
+    }}
     </style>
 """, unsafe_allow_html=True)
 
 # ================= 2. 核心工具 =================
 
 def safe_timestamp_to_datetime(ts):
-    """安全轉換時間戳記"""
     try:
         return datetime.fromtimestamp(float(ts)/1000)
     except:
         return datetime.now()
 
 def to_apy(daily_rate):
-    """日利率轉年化"""
     try:
         return float(daily_rate) * 365 * 100
     except:
@@ -54,7 +62,6 @@ def to_apy(daily_rate):
 
 @st.cache_resource
 def init_exchange(api_key, api_secret):
-    """初始化交易所並強制修補定義"""
     exchange = ccxt.bitfinex({
         'apiKey': api_key,
         'secret': api_secret,
@@ -62,13 +69,12 @@ def init_exchange(api_key, api_secret):
         'nonce': lambda: int(time.time() * 1000000), 
     })
     
-    # 嘗試載入標準市場，失敗則手動注入
     try:
         exchange.load_markets()
     except Exception as e:
         print(f"Market load failed: {e}")
 
-    # 強制注入 USD 與 fUSD 定義 (修復 uppercaseId 錯誤)
+    # 強制注入 USD 與 fUSD 定義
     if exchange.currencies is None: exchange.currencies = {}
     if not hasattr(exchange, 'currencies_by_id') or exchange.currencies_by_id is None:
         exchange.currencies_by_id = {}
@@ -100,20 +106,23 @@ def init_exchange(api_key, api_secret):
 def fetch_data(exchange):
     """一次獲取所有需要的數據"""
     try:
-        # 強制再次注入以防萬一
         init_exchange(exchange.apiKey, exchange.secret)
-        symbol = 'fUSD'
-
-        # 平行獲取數據
+        
+        # 1. 餘額
         balance = exchange.fetch_balance({'type': 'funding'})
         
-        # 抓取較長時間的帳本以計算總收益
+        # 2. 帳本 (收益)
         since_1y = exchange.milliseconds() - (365 * 24 * 60 * 60 * 1000)
         ledgers = exchange.fetch_ledger('USD', since=since_1y, limit=2500)
         
-        active_credits = exchange.private_post_auth_r_funding_credits(params={'symbol': symbol})
-        active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': symbol})
-        raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': symbol, 'limit': 50})
+        # 3. [修正] 抓取所有放貸與掛單 (不指定 symbol，避免參數錯誤)
+        #    Bitfinex Raw API: private_post_auth_r_funding_credits (Active Loans)
+        #    Bitfinex Raw API: private_post_auth_r_funding_offers (Active Orders)
+        active_credits = exchange.private_post_auth_r_funding_credits()
+        active_offers = exchange.private_post_auth_r_funding_offers()
+        
+        # 4. 最近成交
+        raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': 'fUSD', 'limit': 50})
         
         return balance, ledgers, active_credits, active_offers, raw_trades
     except Exception as e:
@@ -136,10 +145,8 @@ def process_earnings(ledgers):
         desc = str(entry.get('description', '')).lower()
         info = str(entry.get('info', '')).lower()
 
-        # 排除本金操作
         if any(x in typ for x in exclude_types): continue
 
-        # 確認是收益
         is_payout = 'payout' in typ
         has_keyword = any(k in info or k in desc or k in typ for k in keywords)
 
@@ -171,6 +178,7 @@ with st.sidebar:
         st.session_state.api_key = st.text_input("API Key", type="password")
         st.session_state.api_secret = st.text_input("API Secret", type="password")
 
+    debug_mode = st.checkbox("🐞 顯示原始數據 (Debug)")
     if st.button("🔄 刷新數據", type="primary", use_container_width=True):
         st.cache_resource.clear()
         st.rerun()
@@ -201,7 +209,6 @@ if not df_earnings.empty:
     total_income = df_earnings['amount'].sum()
     
     cutoff_30d = pd.Timestamp.now().date() - timedelta(days=30)
-    # 修正：轉換 date 欄位為 datetime.date 類型以進行比較
     df_earnings['date'] = pd.to_datetime(df_earnings['date']).dt.date
     last_30d_income = df_earnings[df_earnings['date'] >= cutoff_30d]['amount'].sum()
     
@@ -235,15 +242,16 @@ if not df_earnings.empty:
     
     if start_date > end_date: start_date = end_date
 
-    # 補齊日期
     full_dates = pd.DataFrame(pd.date_range(start=start_date, end=end_date).date, columns=['date'])
     mask = (df_earnings['date'] >= start_date) & (df_earnings['date'] <= end_date)
     
     df_chart = df_earnings.loc[mask].groupby('date')['amount'].sum().reset_index()
     df_chart = pd.merge(full_dates, df_chart, on='date', how='left').fillna(0)
     
-    # 計算每日 APY
-    df_chart['daily_apy'] = (df_chart['amount'] / total_assets * 365 * 100) if total_assets > 0 else 0.0
+    if total_assets > 0:
+        df_chart['daily_apy'] = (df_chart['amount'] / total_assets * 365 * 100)
+    else:
+        df_chart['daily_apy'] = 0.0
 
     if not df_chart.empty:
         fig = px.bar(
@@ -266,72 +274,101 @@ else:
 # 第三層：明細
 st.markdown("---")
 st.subheader("📋 資產明細")
-t1, t2, t3, t4 = st.tabs(["放貸中", "掛單中", "最近成交", "每日收益"])
+t1, t2, t3, t4 = st.tabs(["放貸中 (Loans)", "掛單中 (Orders)", "已成交 (Trades)", "每日收益 (Daily)"])
 
 with t1:
-    if loans:
-        data = []
+    # 處理 Active Loans (Credits)
+    # 不使用 list 嚴格檢查，改用 loop 並檢查內容
+    valid_loans = []
+    if loans and isinstance(loans, list):
         for l in loans:
-            if len(l) >= 13:
+            # 確保 l 是 list 且有足夠長度，並且是 fUSD
+            if isinstance(l, list) and len(l) > 10:
+                # 簡單過濾：如果第二個欄位(symbol)不是 fUSD 則跳過
+                # Bitfinex 回傳格式: [ID, SYMBOL, SIDE, MTS_CREATE, ...]
+                sym = str(l[1])
+                if 'USD' not in sym: continue
+
                 created = safe_timestamp_to_datetime(l[3])
-                days = int(l[12])
-                due = created + timedelta(days=days)
+                
+                # Rate 和 Period 的位置可能在不同版本 API 有變動，通常 rate=11, period=12
+                # 但如果長度不夠，我們嘗試自動偵測或使用安全索引
+                try:
+                    rate = float(l[11])
+                    period = int(l[12])
+                    amount = abs(float(l[5]))
+                except:
+                    continue # 資料格式不符，跳過
+
+                due = created + timedelta(days=period)
                 remain = max(0.0, (due - datetime.now()).total_seconds() / 86400)
                 
-                data.append({
+                valid_loans.append({
                     "開單": created.strftime('%m-%d %H:%M'),
-                    "金額": abs(float(l[5])),
-                    "APY": to_apy(l[11]),
-                    "天數": days,
+                    "金額": amount,
+                    "APY": to_apy(rate),
+                    "天數": period,
                     "剩餘": f"{remain:.1f} 天",
                     "到期": due.strftime('%m-%d %H:%M')
                 })
-        st.dataframe(pd.DataFrame(data).sort_values("APY", ascending=False), use_container_width=True,
+    
+    if valid_loans:
+        st.dataframe(pd.DataFrame(valid_loans).sort_values("APY", ascending=False), use_container_width=True,
                      column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
     else:
-        st.info("無放貸")
+        st.info("目前沒有放貸中的資金 (或 API 回傳格式不符)")
 
 with t2:
-    if offers:
-        data = []
+    valid_offers = []
+    if offers and isinstance(offers, list):
         for o in offers:
-            if len(o) >= 16:
-                rate = float(o[14])
+            if isinstance(o, list) and len(o) > 10:
+                sym = str(o[1])
+                if 'USD' not in sym: continue
+
+                try:
+                    rate = float(o[14])
+                    amount = float(o[4])
+                    period = int(o[15])
+                    created = safe_timestamp_to_datetime(o[2])
+                except:
+                    continue
+
                 is_frr = rate == 0
-                data.append({
-                    "金額": float(o[4]),
+                valid_offers.append({
+                    "金額": amount,
                     "類型": "FRR" if is_frr else "Limit",
                     "APY": "FRR" if is_frr else f"{to_apy(rate):.2f}%",
-                    "天數": int(o[15]),
-                    "建立": safe_timestamp_to_datetime(o[2]).strftime('%m-%d %H:%M')
+                    "天數": period,
+                    "建立": created.strftime('%m-%d %H:%M')
                 })
-        st.dataframe(pd.DataFrame(data), use_container_width=True,
+    
+    if valid_offers:
+        st.dataframe(pd.DataFrame(valid_offers), use_container_width=True,
                      column_config={"金額": st.column_config.NumberColumn(format="$%.2f")})
     else:
         st.info("無掛單")
 
 with t3:
+    valid_trades = []
     if trades and isinstance(trades, list):
-        data = []
-        # 按時間倒序
-        sorted_trades = sorted(trades, key=lambda x: x[2] if len(x)>2 else 0, reverse=True)
-        for t in sorted_trades[:20]: # 只取前20
-            if len(t) >= 7:
+        sorted_trades = sorted(trades, key=lambda x: x[2] if isinstance(x, list) and len(x)>2 else 0, reverse=True)
+        for t in sorted_trades[:20]:
+            if isinstance(t, list) and len(t) >= 7:
                 amt = float(t[4])
-                if amt > 0: # 只顯示借出
-                    data.append({
+                # 只顯示借出 (Amount > 0)
+                if amt > 0:
+                    valid_trades.append({
                         "成交": safe_timestamp_to_datetime(t[2]).strftime('%m-%d %H:%M'),
                         "金額": abs(amt),
                         "APY": to_apy(t[5]),
                         "天數": int(t[6])
                     })
-        if data:
-            st.dataframe(pd.DataFrame(data), use_container_width=True,
-                         column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
-        else:
-            st.info("無有效借出成交")
+    if valid_trades:
+        st.dataframe(pd.DataFrame(valid_trades), use_container_width=True,
+                     column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
     else:
-        st.info("無成交紀錄")
+        st.info("無最近借出成交")
 
 with t4:
     if 'df_chart' in locals() and not df_chart.empty:
@@ -345,3 +382,16 @@ with t4:
                      })
     else:
         st.info("無數據")
+
+if debug_mode:
+    st.markdown("---")
+    st.subheader("🐞 原始資料 (Raw Data)")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("▼ Active Loans (Credits) Raw:")
+        st.write(loans)
+    with c2:
+        st.write("▼ Active Offers Raw:")
+        st.write(offers)
+
+
