@@ -7,7 +7,7 @@ import plotly.express as px
 
 # ================= 1. 設定與樣式 =================
 st.set_page_config(
-    page_title="V14 資產監控",
+    page_title="V14 資產監控 (Debug版)",
     page_icon="💰",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -62,13 +62,12 @@ def init_exchange(api_key, api_secret):
         'nonce': lambda: int(time.time() * 1000000), 
     })
     
-    # 嘗試載入標準市場，失敗則手動注入
     try:
         exchange.load_markets()
     except Exception as e:
         print(f"Market load failed: {e}")
 
-    # 強制注入 USD 與 fUSD 定義 (修復 uppercaseId 錯誤)
+    # 強制注入 USD 與 fUSD 定義
     if exchange.currencies is None: exchange.currencies = {}
     if not hasattr(exchange, 'currencies_by_id') or exchange.currencies_by_id is None:
         exchange.currencies_by_id = {}
@@ -100,17 +99,16 @@ def init_exchange(api_key, api_secret):
 def fetch_data(exchange):
     """一次獲取所有需要的數據"""
     try:
-        # 強制再次注入以防萬一
         init_exchange(exchange.apiKey, exchange.secret)
         symbol = 'fUSD'
 
         # 平行獲取數據
         balance = exchange.fetch_balance({'type': 'funding'})
         
-        # 抓取較長時間的帳本以計算總收益
         since_1y = exchange.milliseconds() - (365 * 24 * 60 * 60 * 1000)
         ledgers = exchange.fetch_ledger('USD', since=since_1y, limit=2500)
         
+        # 這裡的 endpoint 回傳 raw list
         active_credits = exchange.private_post_auth_r_funding_credits(params={'symbol': symbol})
         active_offers = exchange.private_post_auth_r_funding_offers(params={'symbol': symbol})
         raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': symbol, 'limit': 50})
@@ -118,6 +116,7 @@ def fetch_data(exchange):
         return balance, ledgers, active_credits, active_offers, raw_trades
     except Exception as e:
         st.error(f"API 連線錯誤: {str(e)}")
+        # 回傳空結構以防崩潰
         return None, [], [], [], []
 
 def process_earnings(ledgers):
@@ -136,10 +135,8 @@ def process_earnings(ledgers):
         desc = str(entry.get('description', '')).lower()
         info = str(entry.get('info', '')).lower()
 
-        # 排除本金操作
         if any(x in typ for x in exclude_types): continue
 
-        # 確認是收益
         is_payout = 'payout' in typ
         has_keyword = any(k in info or k in desc or k in typ for k in keywords)
 
@@ -171,6 +168,11 @@ with st.sidebar:
         st.session_state.api_key = st.text_input("API Key", type="password")
         st.session_state.api_secret = st.text_input("API Secret", type="password")
 
+    # === [DEBUG 新增功能] ===
+    st.markdown("---")
+    debug_mode = st.checkbox("🐞 開啟除錯模式 (Debug Mode)", value=False)
+    # ======================
+
     if st.button("🔄 刷新數據", type="primary", use_container_width=True):
         st.cache_resource.clear()
         st.rerun()
@@ -199,9 +201,7 @@ apy_all_time = 0.0
 
 if not df_earnings.empty:
     total_income = df_earnings['amount'].sum()
-    
     cutoff_30d = pd.Timestamp.now().date() - timedelta(days=30)
-    # 修正：轉換 date 欄位為 datetime.date 類型以進行比較
     df_earnings['date'] = pd.to_datetime(df_earnings['date']).dt.date
     last_30d_income = df_earnings[df_earnings['date'] >= cutoff_30d]['amount'].sum()
     
@@ -225,7 +225,6 @@ st.subheader("📊 每日績效")
 
 if not df_earnings.empty:
     range_opt = st.radio("範圍", ["7天", "30天", "1年", "全部"], index=1, horizontal=True)
-    
     end_date = pd.Timestamp.now().date()
     start_date = df_earnings['date'].min()
     
@@ -235,14 +234,11 @@ if not df_earnings.empty:
     
     if start_date > end_date: start_date = end_date
 
-    # 補齊日期
     full_dates = pd.DataFrame(pd.date_range(start=start_date, end=end_date).date, columns=['date'])
     mask = (df_earnings['date'] >= start_date) & (df_earnings['date'] <= end_date)
     
     df_chart = df_earnings.loc[mask].groupby('date')['amount'].sum().reset_index()
     df_chart = pd.merge(full_dates, df_chart, on='date', how='left').fillna(0)
-    
-    # 計算每日 APY
     df_chart['daily_apy'] = (df_chart['amount'] / total_assets * 365 * 100) if total_assets > 0 else 0.0
 
     if not df_chart.empty:
@@ -266,15 +262,19 @@ else:
 # 第三層：明細
 st.markdown("---")
 st.subheader("📋 資產明細")
-t1, t2, t3, t4 = st.tabs(["放貸中", "掛單中", "最近成交", "每日收益"])
+t1, t2, t3, t4 = st.tabs(["放貸中 (Active Loans)", "掛單中 (Active Offers)", "最近成交 (Trades)", "每日收益 (Earnings)"])
 
 with t1:
     if loans:
+        # === [DEBUG] ===
+        # 原本邏輯：檢查 len(l) >= 13，如果不符合就不顯示，導致你看不到資料
+        # 新邏輯：先收集資料，如果有問題，Debug 模式會顯示原始結構
         data = []
         for l in loans:
+            # 這裡暫時保留你的判斷，但如果格式變了，這裡就是問題點
             if len(l) >= 13:
                 created = safe_timestamp_to_datetime(l[3])
-                days = int(l[12])
+                days = int(l[12]) # 若 API 變動，12 可能是錯的索引
                 due = created + timedelta(days=days)
                 remain = max(0.0, (due - datetime.now()).total_seconds() / 86400)
                 
@@ -286,10 +286,14 @@ with t1:
                     "剩餘": f"{remain:.1f} 天",
                     "到期": due.strftime('%m-%d %H:%M')
                 })
-        st.dataframe(pd.DataFrame(data).sort_values("APY", ascending=False), use_container_width=True,
-                     column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
+        
+        if data:
+            st.dataframe(pd.DataFrame(data).sort_values("APY", ascending=False), use_container_width=True,
+                        column_config={"APY": st.column_config.NumberColumn(format="%.2f%%"), "金額": st.column_config.NumberColumn(format="$%.2f")})
+        else:
+            st.warning("⚠️ 有收到 API 數據，但格式解析後為空。請開啟除錯模式檢查欄位索引。")
     else:
-        st.info("無放貸")
+        st.info("無放貸 (API 回傳為空)")
 
 with t2:
     if offers:
@@ -313,12 +317,11 @@ with t2:
 with t3:
     if trades and isinstance(trades, list):
         data = []
-        # 按時間倒序
         sorted_trades = sorted(trades, key=lambda x: x[2] if len(x)>2 else 0, reverse=True)
-        for t in sorted_trades[:20]: # 只取前20
+        for t in sorted_trades[:20]: 
             if len(t) >= 7:
                 amt = float(t[4])
-                if amt > 0: # 只顯示借出
+                if amt > 0: # 濾掉借入，只看借出
                     data.append({
                         "成交": safe_timestamp_to_datetime(t[2]).strftime('%m-%d %H:%M'),
                         "金額": abs(amt),
@@ -345,3 +348,21 @@ with t4:
                      })
     else:
         st.info("無數據")
+
+# ================= [DEBUG] 除錯專區 =================
+if debug_mode:
+    st.markdown("---")
+    st.error("🚧 DEBUG MODE ACTIVATED 🚧")
+    
+    st.subheader("1. 原始 Active Loans (Credits) 數據")
+    st.caption("如果這裡是空的 []，代表 API 設定錯誤或沒有權限讀取 Funding Credits。如果這裡有數據但上方表格沒顯示，代表 len(l) >= 13 判斷錯誤。")
+    st.json(loans)
+    
+    st.subheader("2. 原始 Active Offers 數據")
+    st.json(offers)
+    
+    st.subheader("3. 原始 Trades 數據 (前 5 筆)")
+    st.write(trades[:5] if trades else "No Trades")
+    
+    st.subheader("4. 餘額與利用率")
+    st.json(usd_bal)
