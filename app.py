@@ -1,10 +1,10 @@
-# app.py - V20 混合終極版 (強力搜尋連線 + 智能過濾 + 極簡介面)
+# app.py - V21 絕對連線版 (直接指定路徑 + 去除空白 + 智能過濾)
 import streamlit as st
 import ccxt
 from datetime import datetime, timedelta
 import traceback
 
-# ================== 頁面設定 (極簡風格) ==================
+# ================== 頁面設定 ==================
 st.set_page_config(page_title="Bitfinex 資產監控", page_icon="💰", layout="centered")
 
 THEME_BG = "#0E1117"
@@ -20,7 +20,7 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-# ================== 核心邏輯 ==================
+# ================== 核心功能 ==================
 
 def safe_dt(ts):
     try:
@@ -32,66 +32,44 @@ def safe_dt(ts):
 
 @st.cache_resource
 def init_exchange(api_key, api_secret):
+    # 這裡加上 strip() 確保去除前後空白，避免複製貼上時的隱形錯誤
     ex = ccxt.bitfinex({
-        "apiKey": api_key,
-        "secret": api_secret,
+        "apiKey": api_key.strip(),
+        "secret": api_secret.strip(),
         "enableRateLimit": True,
     })
     ex.load_markets()
     return ex
 
-def load_secrets_robust():
-    """V20 強力載入：掃描所有可能的命名方式"""
-    if st.session_state.get("api_key"): return
+def load_secrets_direct():
+    """
+    V21 改進：直接讀取診斷確認存在的路徑 st.secrets['bitfinex']['api_key']
+    不再進行模糊搜尋，避免邏輯錯誤。
+    """
+    # 1. 如果 Session 已經有值，就不用再載入
+    if st.session_state.get("api_key"): 
+        return
 
-    found_key = ""
-    found_secret = ""
+    key = ""
+    secret = ""
 
-    # 定義所有可能的路徑 (格式: [父層Key, 子層Key])
-    # None 代表直接在根目錄
-    key_candidates = [
-        ["bitfinex", "api_key"], ["bitfinex", "key"], ["bitfinex", "apiKey"], 
-        [None, "bitfinex_api_key"], [None, "BITFINEX_API_KEY"],
-        [None, "api_key"], [None, "apikey"], [None, "API_KEY"]
-    ]
-    
-    secret_candidates = [
-        ["bitfinex", "api_secret"], ["bitfinex", "secret"], ["bitfinex", "apiSecret"],
-        [None, "bitfinex_api_secret"], [None, "BITFINEX_API_SECRET"],
-        [None, "api_secret"], [None, "apisecret"], [None, "API_SECRET"]
-    ]
+    # 2. 直接讀取 (根據你的診斷結果)
+    try:
+        if "bitfinex" in st.secrets:
+            section = st.secrets["bitfinex"]
+            key = section.get("api_key")
+            secret = section.get("api_secret")
+    except Exception:
+        pass
 
-    # 掃描 Key
-    for parent, child in key_candidates:
-        if parent: # 巢狀
-            block = st.secrets.get(parent)
-            if isinstance(block, dict):
-                val = block.get(child)
-                if val: found_key = val; break
-        else: # 平鋪
-            val = st.secrets.get(child)
-            if val: found_key = val; break
-
-    # 掃描 Secret
-    for parent, child in secret_candidates:
-        if parent:
-            block = st.secrets.get(parent)
-            if isinstance(block, dict):
-                val = block.get(child)
-                if val: found_secret = val; break
-        else:
-            val = st.secrets.get(child)
-            if val: found_secret = val; break
-
-    if found_key and found_secret:
-        st.session_state.api_key = found_key
-        st.session_state.api_secret = found_secret
+    # 3. 存入 Session
+    if key and secret:
+        st.session_state.api_key = key
+        st.session_state.api_secret = secret
         st.session_state.secrets_loaded = True
-        return True
-    return False
 
 # 執行載入
-load_secrets_robust()
+load_secrets_direct()
 
 # ================== 主程式 ==================
 
@@ -105,35 +83,24 @@ with status_col:
 with title_col:
     st.markdown("### Bitfinex 資產監控")
 
-# 檢查 API 是否存在
+# 檢查 API
 if not st.session_state.get("api_key"):
-    st.info("⚠️ 無法自動讀取 Secrets，請手動輸入或檢查下方診斷資訊。")
+    st.error("⚠️ 讀取失敗。雖然診斷看到了 Keys，但程式無法讀取。")
+    st.info("請檢查 secrets.toml 內容是否包含特殊字元。")
     
+    # 顯示診斷 (再次確認)
+    with st.expander("診斷資訊"):
+        st.write("Root keys:", list(st.secrets.keys()))
+        if "bitfinex" in st.secrets:
+            st.write("Bitfinex keys:", list(st.secrets["bitfinex"].keys()))
+            
     # 備用輸入框
-    with st.sidebar:
-        st.header("手動輸入")
-        k = st.text_input("API Key", type="password")
-        s = st.text_input("API Secret", type="password")
-        if k and s:
-            st.session_state.api_key = k
-            st.session_state.api_secret = s
-            st.rerun()
-            
-    # --- 連線診斷區 (只有連不上時才會出現) ---
-    st.markdown("---")
-    with st.expander("🔍 連線診斷 (若無法連線請點此)"):
-        st.write("程式偵測到的 Secrets 結構 (僅顯示 Key 名稱):")
-        try:
-            # 安全地顯示 keys
-            keys_found = list(st.secrets.keys())
-            st.write(f"根目錄 Keys: {keys_found}")
-            if "bitfinex" in st.secrets:
-                st.write(f"[bitfinex] 區塊內的 Keys: {list(st.secrets['bitfinex'].keys())}")
-            else:
-                st.write("❌ 未偵測到 `[bitfinex]` 區塊")
-        except Exception as e:
-            st.write(f"無法讀取 secrets: {str(e)}")
-            
+    k = st.text_input("手動輸入 API Key", type="password")
+    s = st.text_input("手動輸入 API Secret", type="password")
+    if k and s:
+        st.session_state.api_key = k
+        st.session_state.api_secret = s
+        st.rerun()
     st.stop()
 
 # 獲取與計算數據
@@ -145,6 +112,7 @@ with st.spinner("正在分析帳本..."):
         ledgers = ex.fetch_ledger("USD", since=since, limit=1000)
     except Exception as e:
         st.error(f"連線失敗: {str(e)}")
+        st.caption("請檢查 API Key 是否正確，或權限是否開啟 (Margin Funding: Read)。")
         st.stop()
 
 # 1. 總資產 (Funding Wallet)
