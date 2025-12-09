@@ -104,48 +104,48 @@ def init_exchange(api_key, api_secret):
     return exchange
 
 def fetch_data(exchange):
-    """獲取數據並包含權限檢查"""
+    """
+    一次獲取所有需要的數據 (包含雙重抓取機制)
+    """
     debug_log = {}
-    
-    # 0. 檢查權限 (新增)
-    try:
-        perms = exchange.private_post_auth_r_permissions()
-        debug_log['permissions'] = perms
-    except Exception as e:
-        debug_log['permissions_error'] = str(e)
-
     try:
         # 1. 餘額
         balance = exchange.fetch_balance({'type': 'funding'})
         
-        # 2. 帳本
+        # 2. 帳本 (收益)
         since_1y = exchange.milliseconds() - (365 * 24 * 60 * 60 * 1000)
         ledgers = exchange.fetch_ledger('USD', since=since_1y, limit=2500)
         
-        # 3. Active Credits (強力抓取)
+        # 3. [修正] Active Credits (放貸中)
+        # 改用 _symbol 結尾的方法，確保 URL 是 /credits/fUSD
         active_credits = []
         try:
-            active_credits = exchange.private_post_auth_r_funding_credits({'symbol': 'fUSD'})
-            debug_log['credits_fUSD_count'] = len(active_credits)
-            
-            # 如果 fUSD 沒抓到，嘗試抓全部
-            if not active_credits:
-                active_credits = exchange.private_post_auth_r_funding_credits({})
-                debug_log['credits_ALL_count'] = len(active_credits)
-        except Exception as e:
-            debug_log['credits_error'] = str(e)
+            # 方法 A: 明確指定 fUSD 到 URL
+            active_credits = exchange.private_post_auth_r_funding_credits_symbol({'symbol': 'fUSD'})
+            debug_log['credits_method'] = 'private_post_auth_r_funding_credits_symbol'
+        except Exception as e1:
+            debug_log['credits_error_A'] = str(e1)
+            try:
+                # 方法 B: 備用，不指定符號 (但通常會回傳空)
+                active_credits = exchange.private_post_auth_r_funding_credits()
+                debug_log['credits_method'] = 'private_post_auth_r_funding_credits (fallback)'
+            except Exception as e2:
+                debug_log['credits_error_B'] = str(e2)
 
-        # 4. Active Offers (強力抓取)
+        # 4. [修正] Active Offers (掛單中)
         active_offers = []
         try:
-            active_offers = exchange.private_post_auth_r_funding_offers({'symbol': 'fUSD'})
-            debug_log['offers_fUSD_count'] = len(active_offers)
-            
-            if not active_offers:
-                active_offers = exchange.private_post_auth_r_funding_offers({})
-                debug_log['offers_ALL_count'] = len(active_offers)
-        except Exception as e:
-            debug_log['offers_error'] = str(e)
+            # 方法 A: 明確指定 fUSD 到 URL
+            active_offers = exchange.private_post_auth_r_funding_offers_symbol({'symbol': 'fUSD'})
+            debug_log['offers_method'] = 'private_post_auth_r_funding_offers_symbol'
+        except Exception as e1:
+            debug_log['offers_error_A'] = str(e1)
+            try:
+                # 方法 B: 備用
+                active_offers = exchange.private_post_auth_r_funding_offers()
+                debug_log['offers_method'] = 'private_post_auth_r_funding_offers (fallback)'
+            except Exception as e2:
+                debug_log['offers_error_B'] = str(e2)
         
         # 5. 最近成交
         raw_trades = exchange.private_post_auth_r_funding_trades_symbol_hist({'symbol': 'fUSD', 'limit': 50})
@@ -153,7 +153,7 @@ def fetch_data(exchange):
         return balance, ledgers, active_credits, active_offers, raw_trades, debug_log
     except Exception as e:
         st.error(f"API 連線錯誤: {str(e)}")
-        return None, [], [], [], [], debug_log
+        return None, [], [], [], [], {'error': str(e)}
 
 def process_earnings(ledgers):
     """處理收益數據"""
@@ -204,7 +204,7 @@ with st.sidebar:
         st.session_state.api_key = st.text_input("API Key", type="password")
         st.session_state.api_secret = st.text_input("API Secret", type="password")
 
-    debug_mode = st.checkbox("🐞 顯示偵錯與權限 (Debug)")
+    debug_mode = st.checkbox("🐞 顯示偵錯 (Debug)")
     if st.button("🔄 刷新數據", type="primary", use_container_width=True):
         st.cache_resource.clear()
         st.rerun()
@@ -307,7 +307,6 @@ with t1:
     if loans and isinstance(loans, list):
         for l in loans:
             if isinstance(l, list) and len(l) > 10:
-                # 嘗試放寬過濾：只要 Symbol 包含 USD 就顯示
                 sym = str(l[1])
                 if 'USD' not in sym: continue
 
@@ -403,7 +402,6 @@ with t4:
 if debug_mode:
     st.markdown("---")
     st.subheader("🐞 原始資料 (Raw Data)")
-    st.write("API Key 權限檢查:", debug_info.get('permissions', '無法取得'))
     st.write("Fetch Debug Info:", debug_info)
     c1, c2 = st.columns(2)
     with c1:
